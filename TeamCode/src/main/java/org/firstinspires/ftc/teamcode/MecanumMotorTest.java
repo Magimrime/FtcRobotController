@@ -15,7 +15,9 @@ import com.qualcomm.robotcore.eventloop.opmode.Utility;
  *   - The wrong wheel moves: fix the motor names or ports in the Robot Configuration.
  *   - The right wheel turns backward: flip its direction in MecanumDrivetrain.
  *
- * This goes through MecanumDrivetrain, so it tests the same motor directions the TeleOp uses.
+ * It also shows the port each wheel is configured on, which should match the diagram at the top
+ * of MecanumDrivetrain. This goes through MecanumDrivetrain, so it tests the same names and motor
+ * directions the TeleOp uses.
  */
 @Utility(name = "Mecanum Motor Test", description = "Spin each drive wheel to check motor ports and directions")
 public class MecanumMotorTest extends LinearOpMode {
@@ -27,6 +29,7 @@ public class MecanumMotorTest extends LinearOpMode {
         MecanumDrivetrain drivetrain = new MecanumDrivetrain(hardwareMap);
 
         telemetry.addLine("Prop the robot up so the wheels are off the ground, then press START.");
+        drivetrain.addPortTelemetry(telemetry);
         telemetry.update();
         waitForStart();
 
@@ -41,6 +44,7 @@ public class MecanumMotorTest extends LinearOpMode {
             telemetry.addLine("X = front left     Y = front right");
             telemetry.addLine("A = back left      B = back right");
             telemetry.addLine();
+            drivetrain.addPortTelemetry(telemetry);
             drivetrain.addTelemetry(telemetry);
             telemetry.update();
         }

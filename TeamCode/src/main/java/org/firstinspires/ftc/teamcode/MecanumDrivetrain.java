@@ -12,14 +12,17 @@ import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
  * Hardware and math for a 4-wheel mecanum drivetrain. This is not an OpMode: TeleOp and
  * Autonomous OpModes create one and tell it how to move, so the drive code lives in one place.
  *
- * Wheel layout viewed from above. The rollers on top of the wheels must form an "X" like this,
- * otherwise strafing goes the wrong way.
+ * Wheel layout viewed from above, with the motor port each wheel is plugged into. The intake is
+ * the front, so driving forward goes intake-first. The rollers on top of the wheels must form an
+ * "X" like this, otherwise strafing goes the wrong way.
  *
- *                     FRONT
+ *                  FRONT (intake)
  *      front_left_drive      front_right_drive
+ *           port 3                port 1
  *             \\                     //
  *
  *             //                     \\
+ *           port 2                port 0
  *      back_left_drive        back_right_drive
  *
  * Every drive method takes the same three motions, and any mix of them is allowed:
@@ -29,7 +32,8 @@ import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
  */
 public class MecanumDrivetrain {
 
-    // Device names. These must match the Robot Configuration on the Driver Station.
+    // Device names. The code finds motors by name, not port: in the Robot Configuration on the
+    // Driver Station, give each motor port the name shown for it in the diagram above.
     public static final String FRONT_LEFT_NAME = "front_left_drive";
     public static final String FRONT_RIGHT_NAME = "front_right_drive";
     public static final String BACK_LEFT_NAME = "back_left_drive";
@@ -167,6 +171,13 @@ public class MecanumDrivetrain {
         if (imu != null) {
             imu.resetYaw();
         }
+    }
+
+    /** Adds the port each wheel is configured on, to compare with the diagram at the top. */
+    public void addPortTelemetry(Telemetry telemetry) {
+        telemetry.addData("Ports", "FL %d   FR %d   BL %d   BR %d",
+                frontLeft.getPortNumber(), frontRight.getPortNumber(),
+                backLeft.getPortNumber(), backRight.getPortNumber());
     }
 
     /** Adds the last wheel powers to telemetry. The caller still calls telemetry.update(). */

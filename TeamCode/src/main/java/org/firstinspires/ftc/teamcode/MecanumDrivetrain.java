@@ -12,18 +12,19 @@ import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
  * Hardware and math for a 4-wheel mecanum drivetrain. This is not an OpMode: TeleOp and
  * Autonomous OpModes create one and tell it how to move, so the drive code lives in one place.
  *
- * Wheel layout viewed from above, with the motor port each wheel is plugged into. The intake is
- * the front, so driving forward goes intake-first. The rollers on top of the wheels must form an
- * "X" like this, otherwise strafing goes the wrong way.
+ * Wheel layout viewed from above, with each wheel's configuration name and Control Hub motor
+ * port. The intake is the front, so driving forward goes intake-first ("top" in the names means
+ * the front, "bottom" the back). The rollers on top of the wheels must form an "X" like this,
+ * otherwise strafing goes the wrong way.
  *
  *                  FRONT (intake)
- *      front_left_drive      front_right_drive
+ *          topleft                topright
  *           port 3                port 1
  *             \\                     //
  *
  *             //                     \\
  *           port 2                port 0
- *      back_left_drive        back_right_drive
+ *        bottomleft              bottomright
  *
  * Every drive method takes the same three motions, and any mix of them is allowed:
  *   forward   +1 = drive forward       -1 = drive backward
@@ -34,10 +35,10 @@ public class MecanumDrivetrain {
 
     // Device names. The code finds motors by name, not port: in the Robot Configuration on the
     // Driver Station, give each motor port the name shown for it in the diagram above.
-    public static final String FRONT_LEFT_NAME = "front_left_drive";
-    public static final String FRONT_RIGHT_NAME = "front_right_drive";
-    public static final String BACK_LEFT_NAME = "back_left_drive";
-    public static final String BACK_RIGHT_NAME = "back_right_drive";
+    public static final String FRONT_LEFT_NAME = "topleft";
+    public static final String FRONT_RIGHT_NAME = "topright";
+    public static final String BACK_LEFT_NAME = "bottomleft";
+    public static final String BACK_RIGHT_NAME = "bottomright";
     public static final String IMU_NAME = "imu";
 
     // How the Control Hub is mounted. Field-centric driving is only correct if these match the

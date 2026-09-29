@@ -3,6 +3,8 @@ package org.firstinspires.ftc.teamcode;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import com.qualcomm.robotcore.hardware.Gamepad;
+import com.qualcomm.robotcore.util.ElapsedTime;
+import com.qualcomm.robotcore.util.Range;
 
 import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
 
@@ -13,8 +15,10 @@ import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
  * the whole robot from gamepad 1, or a second driver can take the mechanisms on gamepad 2.
  *
  * Driving (gamepad 1):
- *   Left stick        move: forward, back, strafe left/right, or any diagonal
+ *   Left stick        move: forward, back, strafe left/right, or any diagonal. It never turns
+ *                     the robot: the robot keeps facing the same way and goes in a straight line
  *   Right stick X     turn left / right, in place or while moving
+ *   Right stick click straight-line assist on / off (see below)
  *   Right bumper      hold for precision mode: slower, for lining up
  *   D-pad             nudge slowly forward / back / left / right, relative to the robot
  *                     (overrides the left stick)
@@ -22,14 +26,20 @@ import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
  *   Start (Options)   reset heading: point the robot away from you, then press
  *
  * Mechanisms (either gamepad):
- *   Right trigger     hold to run the intake, pulling balls in
+ *   Right trigger     hold to run the intake motor, pulling balls in
  *   Left trigger      hold to run the intake backwards, pushing balls out
  *   Y                 flywheel on / off
- *   A                 hold to fire: turns the carousel while the flywheel is at speed
- *   X                 hold to turn the carousel forward without firing, to move balls into place
+ *   A                 siphon on / off: press once to start the carousel, again to stop it
  *   B                 hold to turn the carousel backward, to clear a jam
  *   LB + d-pad        hold the left bumper and press up / down to change the flywheel speed
  *                     by 100 RPM (on gamepad 1 the d-pad nudges when the bumper is not held)
+ *
+ * The two feeder servos at the intake run the whole match, pulling balls in. They only reverse
+ * while the left trigger is pushing balls out.
+ *
+ * Straight-line assist: wheels never grip evenly, so a robot told to go straight slowly curves.
+ * While the robot is moving and the right stick is centered, the assist uses the IMU to hold the
+ * way the robot is facing, so it goes straight. It needs the IMU, and it is off while turning.
  *
  * Robot-centric: pushing the left stick forward drives the way the robot is facing.
  * Field-centric: pushing the left stick forward drives away from the driver, whichever way the
@@ -52,10 +62,25 @@ public class RobotTeleOp extends LinearOpMode {
     private static final double PRECISION_MAX_POWER = 0.4;
     private static final double NUDGE_POWER = 0.3;
 
+    // Straight-line assist. The gain is the turn power used per degree the robot is off course:
+    // raise it if the robot still curves, lower it if the robot wobbles side to side.
+    private static final double HEADING_HOLD_GAIN = 0.02;
+    // The most turn power the assist may use, so it can never out-muscle the driver.
+    private static final double HEADING_HOLD_MAX_TURN = 0.3;
+    // The robot keeps spinning for a moment after the turn stick is released. The assist waits
+    // this long before locking the heading, so it doesn't swing back to where the stick let go.
+    private static final double HEADING_HOLD_SETTLE_SECONDS = 0.3;
+
     private MecanumDrivetrain drivetrain;
     private Intake intake;
     private Shooter shooter;
     private boolean fieldCentric = false;
+    private boolean siphonOn = false;
+
+    private boolean straightAssist = true;
+    private boolean holdingHeading = false;
+    private double heldHeading;  // degrees, only meaningful while holdingHeading
+    private final ElapsedTime sinceDriverTurned = new ElapsedTime();
 
     @Override
     public void runOpMode() {
@@ -67,18 +92,22 @@ public class RobotTeleOp extends LinearOpMode {
         while (opModeInInit()) {
             handleDriveModeButtons();
             handleFlywheelSpeedButtons();
-            // Button presses are remembered until read, so a Y press during INIT would otherwise
-            // start the flywheel the moment the match starts. Read and ignore them.
+            // Button presses are remembered until read, so a Y or A press during INIT would
+            // otherwise start the flywheel or siphon the moment the match starts. Read and
+            // ignore them.
             gamepad1.yWasPressed();
             gamepad2.yWasPressed();
+            gamepad1.aWasPressed();
+            gamepad2.aWasPressed();
 
             addStatusTelemetry();
             shooter.addTelemetry(telemetry);
             telemetry.addLine();
             telemetry.addLine("Left stick: move     Right stick: turn     Hold RB: precision");
             telemetry.addLine("D-pad: nudge    Back: robot/field-centric    Start: reset heading");
-            telemetry.addLine("RT/LT: intake in/out    Y: flywheel on/off    A: fire");
-            telemetry.addLine("X/B: carousel forward/back    LB + d-pad: flywheel speed");
+            telemetry.addLine("Right stick click: straight-line assist on/off");
+            telemetry.addLine("RT/LT: intake in/out    Y: flywheel on/off    A: siphon on/off");
+            telemetry.addLine("B: carousel backward    LB + d-pad: flywheel speed");
             telemetry.update();
         }
 
@@ -92,16 +121,18 @@ public class RobotTeleOp extends LinearOpMode {
             if (y1 || y2) {
                 shooter.toggleFlywheel();
             }
+            boolean a1 = gamepad1.aWasPressed();
+            boolean a2 = gamepad2.aWasPressed();
+            if (a1 || a2) {
+                siphonOn = !siphonOn;
+            }
 
             drive();
             runIntake();
-            boolean waitingForFlywheel = runCarousel();
+            runCarousel();
 
             addStatusTelemetry();
             shooter.addTelemetry(telemetry);
-            if (waitingForFlywheel) {
-                telemetry.addLine("Fire: waiting for the flywheel to reach speed");
-            }
             intake.addTelemetry(telemetry);
             drivetrain.addTelemetry(telemetry);
             telemetry.update();
@@ -131,6 +162,8 @@ public class RobotTeleOp extends LinearOpMode {
         boolean nudging = !gamepad1.left_bumper && (gamepad1.dpad_up || gamepad1.dpad_down
                 || gamepad1.dpad_left || gamepad1.dpad_right);
 
+        turn = holdHeading(turn, nudging || moveAmount > 0.0);
+
         if (nudging) {
             double nudgeForward = (gamepad1.dpad_up ? 1.0 : 0.0) - (gamepad1.dpad_down ? 1.0 : 0.0);
             double nudgeStrafe = (gamepad1.dpad_right ? 1.0 : 0.0) - (gamepad1.dpad_left ? 1.0 : 0.0);
@@ -147,41 +180,62 @@ public class RobotTeleOp extends LinearOpMode {
         telemetry.addData("Speed", nudging ? "Nudge" : precision ? "Precision" : "Normal");
     }
 
-    /** Right trigger pulls balls in, left trigger pushes them out. In wins if both are held. */
+    /**
+     * Straight-line assist. Returns the turn to drive with: the driver's own while they are
+     * turning, otherwise a correction that keeps the robot facing the way it was when it started
+     * moving. The assist only works while the robot is being driven, so a parked robot that gets
+     * bumped doesn't fight back or swing around when it next moves.
+     */
+    private double holdHeading(double driverTurn, boolean moving) {
+        if (driverTurn != 0.0) {
+            sinceDriverTurned.reset();
+        }
+        if (!straightAssist || !drivetrain.hasImu() || !moving
+                || sinceDriverTurned.seconds() < HEADING_HOLD_SETTLE_SECONDS) {
+            holdingHeading = false;
+            return driverTurn;
+        }
+
+        double heading = drivetrain.getHeading(AngleUnit.DEGREES);
+        if (!holdingHeading) {
+            holdingHeading = true;
+            heldHeading = heading;
+        }
+        // Heading counts up counter-clockwise but positive turn is clockwise, so a robot that has
+        // drifted counter-clockwise (positive error) needs a positive turn to come back.
+        double error = AngleUnit.normalizeDegrees(heading - heldHeading);
+        return Range.clip(error * HEADING_HOLD_GAIN, -HEADING_HOLD_MAX_TURN, HEADING_HOLD_MAX_TURN);
+    }
+
+    /**
+     * Right trigger pulls balls in, left trigger pushes them out. In wins if both are held. The
+     * feeder servos keep pulling balls in when neither is held.
+     */
     private void runIntake() {
         if (gamepad1.right_trigger_pressed || gamepad2.right_trigger_pressed) {
             intake.in();
         } else if (gamepad1.left_trigger_pressed || gamepad2.left_trigger_pressed) {
             intake.out();
         } else {
-            intake.stop();
+            intake.feedersOnly();
         }
     }
 
-    /**
-     * B turns the carousel backward, X turns it forward, and A fires: forward only while the
-     * flywheel is at speed, so a ball is never pushed into a wheel that is too slow to launch it.
-     * Returns true when A is held but the flywheel is not ready yet.
-     */
-    private boolean runCarousel() {
-        boolean fire = gamepad1.a || gamepad2.a;
-        boolean forward = gamepad1.x || gamepad2.x;
-        boolean reverse = gamepad1.b || gamepad2.b;
-        boolean ready = shooter.isReady();
-
-        if (reverse) {
+    /** A switches the siphon on and off. Holding B turns the carousel backward to clear a jam. */
+    private void runCarousel() {
+        if (gamepad1.b || gamepad2.b) {
             shooter.feedReverse();
-        } else if (forward || (fire && ready)) {
+        } else if (siphonOn) {
             shooter.feed();
         } else {
             shooter.stopFeeding();
         }
-        return fire && !ready && !reverse;
     }
 
     /**
-     * Back switches robot-/field-centric and Start resets the heading; a rumble confirms each.
-     * Called every loop in INIT too, so presses made before START don't fire during the match.
+     * Back switches robot-/field-centric, Start resets the heading and clicking the right stick
+     * switches the straight-line assist; a rumble confirms each. Called every loop in INIT too,
+     * so presses made before START don't fire during the match.
      */
     private void handleDriveModeButtons() {
         if (gamepad1.backWasPressed() && drivetrain.hasImu()) {
@@ -190,7 +244,12 @@ public class RobotTeleOp extends LinearOpMode {
         }
         if (gamepad1.startWasPressed() && drivetrain.hasImu()) {
             drivetrain.resetHeading();
+            holdingHeading = false;  // the held heading was measured from the old zero
             gamepad1.rumble(200);
+        }
+        if (gamepad1.rightStickButtonWasPressed() && drivetrain.hasImu()) {
+            straightAssist = !straightAssist;
+            gamepad1.rumbleBlips(straightAssist ? 2 : 1);  // 2 blips = on, 1 = off
         }
     }
 
@@ -218,8 +277,10 @@ public class RobotTeleOp extends LinearOpMode {
         telemetry.addData("Drive", fieldCentric ? "Field-centric" : "Robot-centric");
         if (drivetrain.hasImu()) {
             telemetry.addData("Heading", "%.1f deg", drivetrain.getHeading(AngleUnit.DEGREES));
+            telemetry.addData("Straight-line assist",
+                    !straightAssist ? "Off" : holdingHeading ? "Holding" : "On");
         } else {
-            telemetry.addData("Heading", "No IMU found, field-centric unavailable");
+            telemetry.addData("Heading", "No IMU found: no field-centric or straight-line assist");
         }
     }
 

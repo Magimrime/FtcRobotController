@@ -9,7 +9,7 @@ import org.firstinspires.ftc.robotcore.external.Telemetry;
 
 /*
  * The intake at the front of the robot: one motor plus a continuous-rotation servo on each side
- * that help pull balls in. All three run together.
+ * that help pull balls in. The two feeder servos run the whole match; the motor runs on demand.
  *
  *   mainmotorintake   Expansion Hub motor port 1
  *   leftfeeder        servo port 5
@@ -63,6 +63,11 @@ public class Intake {
         run(-OUT_POWER);
     }
 
+    /** Stops the motor but keeps both feeders pulling balls in. */
+    public void feedersOnly() {
+        run(0.0, IN_POWER, IN_POWER);
+    }
+
     public void stop() {
         run(0.0);
     }
@@ -96,7 +101,8 @@ public class Intake {
 
     /** Adds the last powers to telemetry. The caller still calls telemetry.update(). */
     public void addTelemetry(Telemetry telemetry) {
-        String state = motorPower > 0.0 ? "In" : motorPower < 0.0 ? "Out" : "Stopped";
+        String state = motorPower > 0.0 ? "In" : motorPower < 0.0 ? "Out"
+                : leftFeederPower != 0.0 || rightFeederPower != 0.0 ? "Feeders only" : "Stopped";
         telemetry.addData("Intake", "%s  (motor %4.2f, feeders %4.2f / %4.2f)",
                 state, motorPower, leftFeederPower, rightFeederPower);
     }

@@ -11,9 +11,9 @@ import org.firstinspires.ftc.robotcore.external.Telemetry;
  * The intake at the front of the robot: one motor plus a continuous-rotation servo on each side
  * that help pull balls in. The two feeder servos run the whole match; the motor runs on demand.
  *
- *   mainmotorintake   Expansion Hub motor port 1
- *   leftfeeder        servo port 5
- *   rightfeeder       servo port 4
+ *   mainmotorintake   Expansion Hub motor port 0
+ *   leftfeeder        Control Hub servo port 0
+ *   rightfeeder       Expansion Hub servo port 0
  *
  * Positive power pulls balls in, negative pushes them back out.
  */

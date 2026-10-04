@@ -19,11 +19,11 @@ import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
  *
  *                  FRONT (intake)
  *          topleft                topright
- *           port 3                port 1
+ *           port 0                port 1
  *             \\                     //
  *
  *             //                     \\
- *           port 2                port 0
+ *           port 2                port 3
  *        bottomleft              bottomright
  *
  * Every drive method takes the same three motions, and any mix of them is allowed:

@@ -11,7 +11,7 @@ import java.util.function.DoubleConsumer;
  * Checks the robot's wiring one device at a time, before the first drive. It is listed in the
  * Driver Station's Utility menu (Driver Station app 11.2 or later).
  *
- * Prop the robot up so the wheels spin freely, then:
+ * Prop the robot up so the wheels spin freely, then (either gamepad works):
  *   D-pad up / down   pick a device
  *   A (hold)          run it forward at low power
  *   B (hold)          run it backward
@@ -88,20 +88,24 @@ public class RobotHardwareTest extends LinearOpMode {
         int selected = 0;
         while (opModeIsActive()) {
             int previous = selected;
-            if (gamepad1.dpadDownWasPressed()) {
+            if (gamepad1.dpadDownWasPressed() | gamepad2.dpadDownWasPressed()) {
                 selected = (selected + 1) % checks.size();
             }
-            if (gamepad1.dpadUpWasPressed()) {
+            if (gamepad1.dpadUpWasPressed() | gamepad2.dpadUpWasPressed()) {
                 selected = (selected + checks.size() - 1) % checks.size();
             }
             if (selected != previous) {
                 checks.get(previous).run.accept(0.0);  // stop the device we just left
             }
 
-            double power = gamepad1.a ? TEST_POWER : gamepad1.b ? -TEST_POWER : 0.0;
+            boolean forward = gamepad1.a || gamepad2.a;   // either gamepad works
+            boolean backward = gamepad1.b || gamepad2.b;
+            double power = forward ? TEST_POWER : backward ? -TEST_POWER : 0.0;
             checks.get(selected).run.accept(power);
 
             telemetry.addLine("D-pad: pick a device.  Hold A: run forward.  Hold B: run backward.");
+            telemetry.addData("Sticks", "GP1 (%+.2f,%+.2f)  GP2 (%+.2f,%+.2f)   0.00 while moving = pad not registered (Start+A / Start+B)",
+                    gamepad1.left_stick_x, -gamepad1.left_stick_y, gamepad2.left_stick_x, -gamepad2.left_stick_y);
             for (int i = 0; i < checks.size(); i++) {
                 telemetry.addLine((i == selected ? "> " : "   ") + checks.get(i).device);
             }

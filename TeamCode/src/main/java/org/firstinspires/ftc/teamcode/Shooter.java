@@ -14,8 +14,8 @@ import org.firstinspires.ftc.robotcore.external.Telemetry;
  * The shooter: a flywheel that launches balls, and the siphon servo that turns the carousel to
  * push the next ball into it.
  *
- *   turret        Expansion Hub motor port 0, encoder cable plugged in   (the flywheel)
- *   servosiphon   servo port 3, continuous rotation                      (turns the carousel)
+ *   turret        Expansion Hub motor port 1, encoder cable plugged in   (the flywheel)
+ *   servosiphon   Expansion Hub servo port 1, continuous rotation   (turns the carousel)
  *
  * The flywheel is given a speed in RPM, not a power. The hub's built-in speed controller reads
  * the encoder and adjusts the power to hold that speed, so shots stay the same as the battery

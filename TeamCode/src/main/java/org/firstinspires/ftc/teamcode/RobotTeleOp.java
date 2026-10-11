@@ -10,6 +10,11 @@ import com.qualcomm.robotcore.hardware.DcMotorSimple;
  * goBILDA mecanum StarterBot (BIOBUZZ). The intake, the siphon and the flywheel spin for the
  * whole match. Left stick drives and strafes, right stick turns. Either gamepad works.
  *
+ * The flywheel is held at a target RPM by Shooter instead of being run at flat full power, so
+ * shots stay the same as the battery drains:
+ *   d-pad up / down   target RPM, in steps of Shooter.RPM_STEP (100 rpm)
+ * Telemetry shows the target, the measured speed, and READY once it is close enough to shoot.
+ *
  * Wheel debugging: hold one button and only that wheel turns, positive power:
  *   triangle (Y) = front left     circle (B) = front right
  *   square (X)   = back left      cross (A)  = back right
@@ -33,10 +38,8 @@ public class RobotTeleOp extends LinearOpMode {
     private static final DcMotorSimple.Direction BOTTOM_LEFT = DcMotorSimple.Direction.REVERSE;
     private static final DcMotorSimple.Direction BOTTOM_RIGHT = DcMotorSimple.Direction.REVERSE;
 
-    // How hard things spin, 0 to 1.
+    // How hard things spin, 0 to 1. The flywheel is set in RPM instead; see Shooter.
     private static final double INTAKE_POWER = 1.0;
-    private static final double SIPHON_POWER = 1.0;
-    private static final double FLYWHEEL_POWER = 1.0;
     private static final double DEBUG_WHEEL_POWER = 0.3;  // one wheel at a time, button held
 
     @Override
@@ -48,8 +51,9 @@ public class RobotTeleOp extends LinearOpMode {
         DcMotor intake = hardwareMap.get(DcMotor.class, "mainmotorintake");
         CRServo leftFeeder = hardwareMap.get(CRServo.class, "leftfeeder");
         CRServo rightFeeder = hardwareMap.get(CRServo.class, "rightfeeder");
-        DcMotor flywheel = hardwareMap.get(DcMotor.class, "turret");
-        CRServo siphon = hardwareMap.get(CRServo.class, "servosiphon");
+
+        // Owns the flywheel ("turret") and the siphon ("servosiphon"), and their directions.
+        Shooter shooter = new Shooter(hardwareMap);
 
         topLeft.setDirection(TOP_LEFT);
         topRight.setDirection(TOP_RIGHT);
@@ -59,9 +63,9 @@ public class RobotTeleOp extends LinearOpMode {
             wheel.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);  // stop quickly when released
         }
         rightFeeder.setDirection(DcMotorSimple.Direction.REVERSE);  // the two feeders face each other
-        siphon.setDirection(DcMotorSimple.Direction.REVERSE);       // goBILDA's windmill direction
 
         telemetry.addLine("Ready. Intake, siphon and flywheel start when the match starts.");
+        telemetry.addData("Flywheel target", "%.0f rpm   (d-pad up/down to change)", shooter.getTargetRpm());
         telemetry.update();
         waitForStart();
 
@@ -69,11 +73,22 @@ public class RobotTeleOp extends LinearOpMode {
         intake.setPower(INTAKE_POWER);
         leftFeeder.setPower(INTAKE_POWER);
         rightFeeder.setPower(INTAKE_POWER);
-        siphon.setPower(SIPHON_POWER);
-        flywheel.setPower(FLYWHEEL_POWER);
+        shooter.feed();
+        shooter.startFlywheel();
 
         while (opModeIsActive()) {
             double fl, fr, bl, br;
+
+            // Flywheel speed: d-pad up speeds it up, d-pad down slows it down, 100 rpm a press.
+            // Single | on purpose, not ||: these WasPressed methods clear the button latch when
+            // they are called, so short-circuiting would leave the other gamepad's press stored
+            // up to fire a loop later, after the driver let go.
+            if (gamepad1.dpadUpWasPressed() | gamepad2.dpadUpWasPressed()) {
+                shooter.adjustTargetRpm(Shooter.RPM_STEP);
+            }
+            if (gamepad1.dpadDownWasPressed() | gamepad2.dpadDownWasPressed()) {
+                shooter.adjustTargetRpm(-Shooter.RPM_STEP);
+            }
 
             // Wheel debugging: hold triangle / circle / square / cross to run just that wheel.
             boolean testFrontLeft = gamepad1.y || gamepad2.y;    // triangle
@@ -120,6 +135,8 @@ public class RobotTeleOp extends LinearOpMode {
                     gamepad1.left_stick_x, -gamepad1.left_stick_y, gamepad1.right_stick_x,
                     gamepad2.left_stick_x, -gamepad2.left_stick_y, gamepad2.right_stick_x);
             telemetry.addData("Wheels", "FL %.2f  FR %.2f  BL %.2f  BR %.2f", fl, fr, bl, br);
+            shooter.addTelemetry(telemetry);
+            telemetry.addLine("D-pad up/down = flywheel rpm");
             telemetry.addLine("Hold triangle=front left  circle=front right  square=back left  cross=back right");
             telemetry.update();
         }

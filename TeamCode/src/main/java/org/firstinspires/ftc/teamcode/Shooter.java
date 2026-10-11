@@ -59,7 +59,9 @@ public class Shooter {
         // must move balls toward the flywheel. Check both with the "Robot Hardware Test" utility
         // and flip FORWARD/REVERSE on anything that runs the wrong way.
         flywheel.setDirection(DcMotorSimple.Direction.FORWARD);
-        siphon.setDirection(DcMotorSimple.Direction.FORWARD);
+        // REVERSE is goBILDA's windmill direction, carried over from the TeleOp that used to run
+        // this servo directly and was checked on the robot.
+        siphon.setDirection(DcMotorSimple.Direction.REVERSE);
 
         // FLOAT lets the flywheel coast to a stop instead of braking hard, which is easier on the
         // gears. The run mode is switched in startFlywheel() and stopFlywheel(); see there.

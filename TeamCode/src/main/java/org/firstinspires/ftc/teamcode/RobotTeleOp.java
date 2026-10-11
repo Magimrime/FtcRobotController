@@ -12,9 +12,19 @@ import com.qualcomm.robotcore.hardware.DcMotorSimple;
  *
  * The flywheel is held at a target RPM by Shooter instead of being run at flat full power, so
  * shots stay the same as the battery drains:
- *   d-pad left / right   pick the shooting area (CLOSE, MID, FAR); each has its own RPM
- *   d-pad up / down      trim the RPM from there, in steps of Shooter.RPM_STEP (10 rpm)
- * Telemetry shows the target, the measured speed, and READY once it is close enough to shoot.
+ *
+ * AUTO (the default): DriveOdometry tracks where the robot is from its drive wheels, and the
+ * flywheel speed is looked up from how far it is from the goal.
+ *   before START: d-pad left / right   pick the starting spot, so it knows where the goal is
+ *   d-pad up / down                    trim the RPM, in steps of Shooter.RPM_STEP (10 rpm)
+ *   right bumper                       "the robot is back on its starting spot": resets the
+ *                                      position, which drifts as the wheels slip
+ *   left bumper                        switch between AUTO and MANUAL
+ * MANUAL, for when the position has drifted too far to trust:
+ *   d-pad left / right                 pick the shooting area (CLOSE, MID, FAR)
+ *   d-pad up / down                    trim the RPM from there
+ * Telemetry shows the position, the distance to the goal, the target and measured speed, and
+ * READY once the flywheel is close enough to shoot.
  *
  * Wheel debugging: hold one button and only that wheel turns, positive power:
  *   triangle (Y) = front left     circle (B) = front right
@@ -43,8 +53,24 @@ public class RobotTeleOp extends LinearOpMode {
     private static final double INTAKE_POWER = 1.0;
     private static final double DEBUG_WHEEL_POWER = 0.3;  // one wheel at a time, button held
 
-    // Flywheel speed for each shooting area, nearest the goal first. D-pad left / right steps
-    // through them. THE RPM VALUES ARE PLACEHOLDERS: park the robot in each area, trim with d-pad
+    // AUTO speed, part 1: where the goal is from each spot the robot can start on, in inches,
+    // measured with a tape from the middle of the robot. "Forward" is the way the robot faces
+    // when it is placed; a goal to its right has a negative "left". THESE ARE PLACEHOLDERS:
+    // measure the real field. Add or remove starting spots, keeping the three lists in step.
+    private static final String[] START_NAMES = {"START A", "START B"};
+    private static final double[] GOAL_FORWARD_IN = {72.0, 72.0};
+    private static final double[] GOAL_LEFT_IN = {24.0, -24.0};
+
+    // AUTO speed, part 2: the flywheel RPM that scores from each distance to the goal, nearest
+    // first. Distances in between are worked out on a straight line between the two nearest
+    // rows; closer than the first or further than the last uses that row's RPM. THESE ARE
+    // PLACEHOLDERS TOO: shoot from three or more measured distances, trim with d-pad up / down
+    // until shots land, and write each distance and RPM in here.
+    private static final double[] SHOT_DISTANCE_IN = {24.0, 60.0, 96.0};
+    private static final double[] SHOT_RPM = {200.0, 250.0, 290.0};
+
+    // MANUAL speed: one RPM for each shooting area, nearest the goal first. D-pad left / right
+    // steps through them. THE RPM VALUES ARE PLACEHOLDERS: park the robot in each area, trim with d-pad
     // up / down until shots land, and write the number telemetry shows back in here. Add or
     // remove areas freely, as long as both lists stay the same length.
     private static final String[] AREA_NAMES = {"CLOSE", "MID", "FAR"};
@@ -63,8 +89,6 @@ public class RobotTeleOp extends LinearOpMode {
 
         // Owns the flywheel ("turret") and the siphon ("servosiphon"), and their directions.
         Shooter shooter = new Shooter(hardwareMap);
-        int area = STARTING_AREA;
-        shooter.setTargetRpm(AREA_RPM[area]);
 
         topLeft.setDirection(TOP_LEFT);
         topRight.setDirection(TOP_RIGHT);
@@ -75,11 +99,33 @@ public class RobotTeleOp extends LinearOpMode {
         }
         rightFeeder.setDirection(DcMotorSimple.Direction.REVERSE);  // the two feeders face each other
 
-        telemetry.addLine("Ready. Intake, siphon and flywheel start when the match starts.");
-        telemetry.addData("Flywheel target", "%s  %.0f rpm   (d-pad left/right = area, up/down = trim)",
-                AREA_NAMES[area], shooter.getTargetRpm());
-        telemetry.update();
-        waitForStart();
+        DriveOdometry odometry = new DriveOdometry(hardwareMap, topLeft, topRight, bottomLeft, bottomRight);
+
+        // Before the match: pick the spot the robot is starting on, so it knows where the goal is.
+        int start = 0;
+        while (opModeInInit()) {
+            if (gamepad1.dpadRightWasPressed() | gamepad2.dpadRightWasPressed()) {
+                start = (start + 1) % START_NAMES.length;
+            }
+            if (gamepad1.dpadLeftWasPressed() | gamepad2.dpadLeftWasPressed()) {
+                start = (start + START_NAMES.length - 1) % START_NAMES.length;
+            }
+            telemetry.addLine("Ready. Intake, siphon and flywheel start when the match starts.");
+            telemetry.addData("Starting spot", "%s   (d-pad left/right to change)", START_NAMES[start]);
+            telemetry.addData("Goal from here", "%.0f in forward, %.0f in left",
+                    GOAL_FORWARD_IN[start], GOAL_LEFT_IN[start]);
+            if (!odometry.hasGyro()) {
+                telemetry.addLine("No \"imu\" in the Robot Configuration: position will drift quickly");
+            }
+            telemetry.update();
+        }
+        double goalX = GOAL_FORWARD_IN[start];
+        double goalY = GOAL_LEFT_IN[start];
+        odometry.reset();  // the robot is on its starting spot now
+
+        boolean autoSpeed = true;
+        int area = STARTING_AREA;
+        double trim = 0.0;  // rpm added by the driver with d-pad up / down
 
         // Everything that just spins.
         intake.setPower(INTAKE_POWER);
@@ -91,26 +137,44 @@ public class RobotTeleOp extends LinearOpMode {
         while (opModeIsActive()) {
             double fl, fr, bl, br;
 
-            // Flywheel speed: d-pad left / right picks the shooting area and jumps to its RPM;
-            // d-pad up / down then trims it, 10 rpm a press. The list stops at each end.
+            odometry.update();
+            double distance = odometry.distanceTo(goalX, goalY);
+
             // Single | on purpose, not ||: these WasPressed methods clear the button latch when
             // they are called, so short-circuiting would leave the other gamepad's press stored
-            // up to fire a loop later, after the driver let go.
-            int previousArea = area;
-            if (gamepad1.dpadRightWasPressed() | gamepad2.dpadRightWasPressed()) {
-                area = Math.min(area + 1, AREA_RPM.length - 1);
+            // up to fire a loop later, after the driver let go. Every button is read every loop
+            // for the same reason, even the ones that do nothing in the current mode.
+            boolean areaFurther = gamepad1.dpadRightWasPressed() | gamepad2.dpadRightWasPressed();
+            boolean areaCloser = gamepad1.dpadLeftWasPressed() | gamepad2.dpadLeftWasPressed();
+            boolean faster = gamepad1.dpadUpWasPressed() | gamepad2.dpadUpWasPressed();
+            boolean slower = gamepad1.dpadDownWasPressed() | gamepad2.dpadDownWasPressed();
+            boolean switchMode = gamepad1.leftBumperWasPressed() | gamepad2.leftBumperWasPressed();
+            boolean backOnStart = gamepad1.rightBumperWasPressed() | gamepad2.rightBumperWasPressed();
+
+            if (switchMode) {
+                autoSpeed = !autoSpeed;
+                trim = 0.0;
             }
-            if (gamepad1.dpadLeftWasPressed() | gamepad2.dpadLeftWasPressed()) {
-                area = Math.max(area - 1, 0);
+            if (backOnStart) {
+                odometry.reset();
             }
-            if (area != previousArea) {
-                shooter.setTargetRpm(AREA_RPM[area]);
+            if (!autoSpeed && (areaFurther || areaCloser)) {
+                area = areaFurther ? Math.min(area + 1, AREA_RPM.length - 1) : Math.max(area - 1, 0);
+                trim = 0.0;
             }
-            if (gamepad1.dpadUpWasPressed() | gamepad2.dpadUpWasPressed()) {
-                shooter.adjustTargetRpm(Shooter.RPM_STEP);
+            if (faster) {
+                trim += Shooter.RPM_STEP;
             }
-            if (gamepad1.dpadDownWasPressed() | gamepad2.dpadDownWasPressed()) {
-                shooter.adjustTargetRpm(-Shooter.RPM_STEP);
+            if (slower) {
+                trim -= Shooter.RPM_STEP;
+            }
+
+            // Flywheel speed: from the distance to the goal in AUTO, from the chosen area in
+            // MANUAL, plus the driver's trim either way. Only sent to the motor when it changes.
+            double baseRpm = autoSpeed ? rpmForDistance(distance) : AREA_RPM[area];
+            double wantedRpm = Math.max(0.0, Math.min(Shooter.MAX_RPM, Math.rint(baseRpm + trim)));
+            if (wantedRpm != shooter.getTargetRpm()) {
+                shooter.setTargetRpm(wantedRpm);
             }
 
             // Wheel debugging: hold triangle / circle / square / cross to run just that wheel.
@@ -158,13 +222,34 @@ public class RobotTeleOp extends LinearOpMode {
                     gamepad1.left_stick_x, -gamepad1.left_stick_y, gamepad1.right_stick_x,
                     gamepad2.left_stick_x, -gamepad2.left_stick_y, gamepad2.right_stick_x);
             telemetry.addData("Wheels", "FL %.2f  FR %.2f  BL %.2f  BR %.2f", fl, fr, bl, br);
-            telemetry.addData("Shooting area", "%s   trim %+.0f rpm", AREA_NAMES[area],
-                    shooter.getTargetRpm() - AREA_RPM[area]);
+            if (autoSpeed) {
+                telemetry.addData("Flywheel speed", "AUTO   %.0f in from goal   trim %+.0f rpm", distance, trim);
+            } else {
+                telemetry.addData("Flywheel speed", "MANUAL   area %s   trim %+.0f rpm", AREA_NAMES[area], trim);
+            }
             shooter.addTelemetry(telemetry);
-            telemetry.addLine("D-pad left/right = shooting area   up/down = trim rpm");
+            odometry.addTelemetry(telemetry);
+            telemetry.addLine("Left bumper = auto/manual   right bumper = robot is back on its start spot");
+            telemetry.addLine("D-pad up/down = trim rpm   left/right = shooting area (manual)");
             telemetry.addLine("Hold triangle=front left  circle=front right  square=back left  cross=back right");
             telemetry.update();
         }
+    }
+
+    /** The flywheel RPM for a distance to the goal in inches, from the SHOT_ lists above. */
+    private static double rpmForDistance(double distanceIn) {
+        int last = SHOT_DISTANCE_IN.length - 1;
+        if (distanceIn <= SHOT_DISTANCE_IN[0]) {
+            return SHOT_RPM[0];
+        }
+        for (int i = 1; i <= last; i++) {
+            if (distanceIn <= SHOT_DISTANCE_IN[i]) {
+                double along = (distanceIn - SHOT_DISTANCE_IN[i - 1])
+                        / (SHOT_DISTANCE_IN[i] - SHOT_DISTANCE_IN[i - 1]);
+                return SHOT_RPM[i - 1] + along * (SHOT_RPM[i] - SHOT_RPM[i - 1]);
+            }
+        }
+        return SHOT_RPM[last];
     }
 
     /** One stick axis from both gamepads: whichever is pushed further wins. */

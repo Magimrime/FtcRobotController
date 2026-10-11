@@ -29,7 +29,7 @@ import java.util.function.DoubleConsumer;
 public class RobotHardwareTest extends LinearOpMode {
 
     private static final double TEST_POWER = 0.3;
-    private static final double FLYWHEEL_TEST_RPM = 1000.0;
+    private static final double FLYWHEEL_TEST_RPM = 100.0;  // about a third of the motor's top speed
 
     /** One device to test: its name, what running it forward should do, and how to run it. */
     private static class Check {

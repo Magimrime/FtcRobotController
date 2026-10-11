@@ -12,7 +12,7 @@ import com.qualcomm.robotcore.hardware.DcMotorSimple;
  *
  * The flywheel is held at a target RPM by Shooter instead of being run at flat full power, so
  * shots stay the same as the battery drains:
- *   d-pad up / down   target RPM, in steps of Shooter.RPM_STEP (100 rpm)
+ *   d-pad up / down   target RPM, in steps of Shooter.RPM_STEP (10 rpm)
  * Telemetry shows the target, the measured speed, and READY once it is close enough to shoot.
  *
  * Wheel debugging: hold one button and only that wheel turns, positive power:
@@ -79,7 +79,7 @@ public class RobotTeleOp extends LinearOpMode {
         while (opModeIsActive()) {
             double fl, fr, bl, br;
 
-            // Flywheel speed: d-pad up speeds it up, d-pad down slows it down, 100 rpm a press.
+            // Flywheel speed: d-pad up speeds it up, d-pad down slows it down, 10 rpm a press.
             // Single | on purpose, not ||: these WasPressed methods clear the button latch when
             // they are called, so short-circuiting would leave the other gamepad's press stored
             // up to fire a loop later, after the driver let go.

@@ -19,10 +19,15 @@ import org.firstinspires.ftc.robotcore.external.Telemetry;
  *
  * The flywheel is given a speed in RPM, not a power. The hub's built-in speed controller reads
  * the encoder and adjusts the power to hold that speed, so shots stay the same as the battery
- * drains and the wheel recovers quickly after each ball. This only works if the "turret" motor
- * in the Robot Configuration is set to the real motor model, not "Unspecified Motor": the
- * controller's tuning and the RPM figures both come from the model's encoder ticks per turn and
- * top speed. Telemetry shows the model the robot is using.
+ * drains and the wheel recovers quickly after each ball.
+ *
+ * The flywheel motor is a goBILDA 5203 series, 19.2:1, 312 RPM. Its encoder ticks per turn and
+ * top speed are written below rather than read from the Robot Configuration, because the only
+ * matching choice there, "GoBILDA 5202/3/4 series", describes the 99.5:1 version (2786 ticks,
+ * 60 RPM) and would cap the target at 60 RPM. Still pick that choice for "turret", not
+ * "Unspecified Motor": the hub tunes its speed controller from it, and both versions top out at
+ * nearly the same encoder ticks per second, so that tuning fits. If the motor is ever swapped
+ * for a different ratio, change TICKS_PER_REV and MAX_RPM to match its label.
  */
 public class Shooter {
 
@@ -31,8 +36,14 @@ public class Shooter {
 
     // Flywheel speed, in RPM of the motor's output shaft. Tune it at the field: gamepad 2's d-pad
     // changes it by RPM_STEP while the TeleOp runs, and telemetry shows the current value.
-    public static final double DEFAULT_RPM = 3000.0;
-    public static final double RPM_STEP = 100.0;
+    public static final double DEFAULT_RPM = 250.0;
+    public static final double RPM_STEP = 10.0;
+
+    // goBILDA 5203 series, 19.2:1: encoder ticks per turn of the output shaft, and its top speed
+    // with nothing attached. It cannot hold a target right at the top, so expect the useful
+    // range to end somewhere around 280.
+    public static final double TICKS_PER_REV = 537.7;
+    public static final double MAX_RPM = 312.0;
 
     // The flywheel is ready to shoot once its speed is within this fraction of the target. Each
     // shot slows it briefly, so firing pauses until it has recovered.
@@ -68,10 +79,11 @@ public class Shooter {
         flywheel.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.FLOAT);
         flywheel.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
 
-        // Encoder ticks per turn and top speed come from the motor model in the configuration.
+        // The configured motor model is kept only to show on telemetry; see the top of this file
+        // for why the ticks per turn and top speed are not taken from it.
         motorType = flywheel.getMotorType();
-        ticksPerRev = motorType.getTicksPerRev();
-        maxRpm = motorType.getMaxRPM();
+        ticksPerRev = TICKS_PER_REV;
+        maxRpm = MAX_RPM;
         targetRpm = Range.clip(DEFAULT_RPM, 0.0, maxRpm);
     }
 
@@ -111,7 +123,7 @@ public class Shooter {
         setTargetRpm(targetRpm + delta);
     }
 
-    /** Sets the target speed in RPM, limited to what the motor model can do. */
+    /** Sets the target speed in RPM, limited to what the motor can do. */
     public void setTargetRpm(double rpm) {
         targetRpm = Range.clip(rpm, 0.0, maxRpm);
         if (flywheelOn) {
@@ -170,8 +182,8 @@ public class Shooter {
     public void addPortTelemetry(Telemetry telemetry) {
         telemetry.addData("Shooter ports", "flywheel %d   siphon %d",
                 flywheel.getPortNumber(), siphon.getPortNumber());
-        telemetry.addData("Flywheel motor model", "%s: %.0f ticks/turn, %.0f RPM max",
-                motorType.getName(), ticksPerRev, maxRpm);
+        telemetry.addData("Flywheel motor", "%.1f ticks/turn, %.0f RPM max   (configured as %s)",
+                ticksPerRev, maxRpm, motorType.getName());
     }
 
     /** Adds the shooter state to telemetry. The caller still calls telemetry.update(). */
@@ -181,7 +193,7 @@ public class Shooter {
         telemetry.addData("Shooter", "%s   %.0f / %.0f rpm", state, rpm, targetRpm);
         telemetry.addData("Siphon", siphonPower > 0.0 ? "Feeding" : siphonPower < 0.0 ? "Reverse" : "Stopped");
         if (flywheelOn && rpm == 0.0) {
-            telemetry.addLine("Flywheel reads 0 rpm: check its encoder cable and motor model");
+            telemetry.addLine("Flywheel reads 0 rpm: check its encoder cable");
         }
     }
 }

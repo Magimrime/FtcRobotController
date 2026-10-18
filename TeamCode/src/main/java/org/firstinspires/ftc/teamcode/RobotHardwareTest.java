@@ -2,10 +2,12 @@ package org.firstinspires.ftc.teamcode;
 
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 import com.qualcomm.robotcore.eventloop.opmode.Utility;
+import com.qualcomm.robotcore.hardware.CRServo;
+import com.qualcomm.robotcore.hardware.DcMotor;
+import com.qualcomm.robotcore.hardware.DcMotorSimple;
 
 import java.util.Arrays;
 import java.util.List;
-import java.util.function.DoubleConsumer;
 
 /*
  * Checks the robot's wiring one device at a time, before the first drive. It is listed in the
@@ -13,112 +15,153 @@ import java.util.function.DoubleConsumer;
  *
  * Prop the robot up so the wheels spin freely, then (either gamepad works):
  *   D-pad up / down   pick a device
- *   A (hold)          run it forward at low power
- *   B (hold)          run it backward
+ *   A (hold)          run it forward at low power while held
+ *   B (hold)          run it backward while held
+ *   X                 toggle it ON forward; it keeps running while you pick other devices
+ *   Y                 toggle it ON backward
+ *   Back              stop everything
+ *
+ * So you can test one device at a time with A/B, or latch several on with X/Y and watch them
+ * run together.
  *
  * The screen says what the device should do. If a different device moves, fix the names or
  * ports in the Robot Configuration. If the right device moves the wrong way, flip its direction
- * in MecanumDrivetrain, Intake or Shooter. The screen also shows the port each name is
- * configured on and the flywheel's motor model, so a configuration mistake shows up before
- * anything moves.
+ * constant below (and the matching one in the TeleOp / MechanismTestAuto). The screen also shows
+ * the port each name is configured on, so a configuration mistake shows up before anything moves.
  *
- * Everything runs through the same classes the TeleOp uses, so it tests the same names and
- * directions.
+ * Robot Configuration names:
+ *   topleft, topright, bottomleft, bottomright   wheel motors, Control Hub motor ports 0-3
+ *   mainmotorintake                              intake motor, Expansion Hub motor 0
+ *   turret                                       flywheel motor, Expansion Hub motor 1
+ *   leftfeeder                                   intake servo, Control Hub servo 0
+ *   rightfeeder                                  intake servo, Expansion Hub servo 0
+ *   servosiphon                                  siphon servo, Expansion Hub servo 1
  */
 @Utility(name = "Robot Hardware Test", description = "Run each motor and servo one at a time to check ports and directions")
 public class RobotHardwareTest extends LinearOpMode {
 
     private static final double TEST_POWER = 0.3;
-    private static final double FLYWHEEL_TEST_RPM = 1000.0;
 
-    /** One device to test: its name, what running it forward should do, and how to run it. */
+    // Directions, same as the TeleOp and MechanismTestAuto. Flip any that run backward.
+    private static final DcMotorSimple.Direction TOP_LEFT = DcMotorSimple.Direction.REVERSE;
+    private static final DcMotorSimple.Direction TOP_RIGHT = DcMotorSimple.Direction.FORWARD;
+    private static final DcMotorSimple.Direction BOTTOM_LEFT = DcMotorSimple.Direction.REVERSE;
+    private static final DcMotorSimple.Direction BOTTOM_RIGHT = DcMotorSimple.Direction.REVERSE;
+    private static final DcMotorSimple.Direction INTAKE = DcMotorSimple.Direction.FORWARD;
+    private static final DcMotorSimple.Direction LEFT_FEEDER = DcMotorSimple.Direction.FORWARD;
+    private static final DcMotorSimple.Direction RIGHT_FEEDER = DcMotorSimple.Direction.REVERSE;
+    private static final DcMotorSimple.Direction SIPHON = DcMotorSimple.Direction.REVERSE;
+    private static final DcMotorSimple.Direction FLYWHEEL = DcMotorSimple.Direction.FORWARD;
+
+    /** One device to test: its label, what running it forward should do, and how to power it. */
     private static class Check {
-        final String device;
+        final String label;
         final String expected;
-        final DoubleConsumer run;  // given +TEST_POWER (A), -TEST_POWER (B) or 0 every loop
+        final DcMotorSimple device;  // DcMotor and CRServo both have setPower()
+        final int port;              // DcMotorSimple itself has no getPortNumber(), so it is passed in
 
-        Check(String device, String expected, DoubleConsumer run) {
-            this.device = device;
+        Check(String label, String expected, DcMotor motor) {
+            this(label, expected, motor, motor.getPortNumber());
+        }
+
+        Check(String label, String expected, CRServo servo) {
+            this(label, expected, servo, servo.getPortNumber());
+        }
+
+        private Check(String label, String expected, DcMotorSimple device, int port) {
+            this.label = label;
             this.expected = expected;
-            this.run = run;
+            this.device = device;
+            this.port = port;
         }
     }
 
     @Override
     public void runOpMode() {
-        MecanumDrivetrain drivetrain = new MecanumDrivetrain(hardwareMap);
-        Intake intake = new Intake(hardwareMap);
-        Shooter shooter = new Shooter(hardwareMap);
+        DcMotor topLeft = hardwareMap.get(DcMotor.class, "topleft");
+        DcMotor topRight = hardwareMap.get(DcMotor.class, "topright");
+        DcMotor bottomLeft = hardwareMap.get(DcMotor.class, "bottomleft");
+        DcMotor bottomRight = hardwareMap.get(DcMotor.class, "bottomright");
+        DcMotor intake = hardwareMap.get(DcMotor.class, "mainmotorintake");
+        DcMotor flywheel = hardwareMap.get(DcMotor.class, "turret");
+        CRServo leftFeeder = hardwareMap.get(CRServo.class, "leftfeeder");
+        CRServo rightFeeder = hardwareMap.get(CRServo.class, "rightfeeder");
+        CRServo siphon = hardwareMap.get(CRServo.class, "servosiphon");
+
+        topLeft.setDirection(TOP_LEFT);
+        topRight.setDirection(TOP_RIGHT);
+        bottomLeft.setDirection(BOTTOM_LEFT);
+        bottomRight.setDirection(BOTTOM_RIGHT);
+        intake.setDirection(INTAKE);
+        flywheel.setDirection(FLYWHEEL);
+        leftFeeder.setDirection(LEFT_FEEDER);
+        rightFeeder.setDirection(RIGHT_FEEDER);
+        siphon.setDirection(SIPHON);
 
         List<Check> checks = Arrays.asList(
-                new Check("Front left wheel  (topleft)", "rolls the robot FORWARD",
-                        p -> drivetrain.setWheelPowers(p, 0, 0, 0)),
-                new Check("Front right wheel (topright)", "rolls the robot FORWARD",
-                        p -> drivetrain.setWheelPowers(0, p, 0, 0)),
-                new Check("Back left wheel   (bottomleft)", "rolls the robot FORWARD",
-                        p -> drivetrain.setWheelPowers(0, 0, p, 0)),
-                new Check("Back right wheel  (bottomright)", "rolls the robot FORWARD",
-                        p -> drivetrain.setWheelPowers(0, 0, 0, p)),
-                new Check("Intake motor (mainmotorintake)", "pulls a ball IN",
-                        p -> intake.run(p, 0, 0)),
-                new Check("Left feeder  (leftfeeder)", "pulls a ball IN",
-                        p -> intake.run(0, p, 0)),
-                new Check("Right feeder (rightfeeder)", "pulls a ball IN",
-                        p -> intake.run(0, 0, p)),
-                new Check("Siphon (servosiphon)", "turns the carousel TOWARD the flywheel",
-                        shooter::runSiphon),
-                new Check("Flywheel (turret)", "spins so a ball would launch OUT (A only; watch the rpm reading)",
-                        p -> {
-                            if (p > 0) {
-                                shooter.setTargetRpm(FLYWHEEL_TEST_RPM);
-                                shooter.startFlywheel();
-                            } else {
-                                shooter.stopFlywheel();
-                            }
-                        }));
+                new Check("Front left wheel  (topleft)", "rolls the robot FORWARD", topLeft),
+                new Check("Front right wheel (topright)", "rolls the robot FORWARD", topRight),
+                new Check("Back left wheel   (bottomleft)", "rolls the robot FORWARD", bottomLeft),
+                new Check("Back right wheel  (bottomright)", "rolls the robot FORWARD", bottomRight),
+                new Check("Intake motor (mainmotorintake)", "pulls a ball IN", intake),
+                new Check("Left feeder  (leftfeeder)", "pulls a ball IN", leftFeeder),
+                new Check("Right feeder (rightfeeder)", "pulls a ball IN", rightFeeder),
+                new Check("Siphon (servosiphon)", "turns the carousel TOWARD the flywheel", siphon),
+                new Check("Flywheel (turret)", "spins so a ball would launch OUT", flywheel));
 
         telemetry.addLine("Prop the robot up so the wheels are off the ground, then press START.");
         telemetry.addLine();
-        drivetrain.addPortTelemetry(telemetry);
-        intake.addPortTelemetry(telemetry);
-        shooter.addPortTelemetry(telemetry);
+        addPortTelemetry(checks);
         telemetry.update();
         waitForStart();
 
         int selected = 0;
+        int[] latched = new int[checks.size()];  // per device: +1 forward, -1 backward, 0 off
         while (opModeIsActive()) {
-            int previous = selected;
             if (gamepad1.dpadDownWasPressed() | gamepad2.dpadDownWasPressed()) {
                 selected = (selected + 1) % checks.size();
             }
             if (gamepad1.dpadUpWasPressed() | gamepad2.dpadUpWasPressed()) {
                 selected = (selected + checks.size() - 1) % checks.size();
             }
-            if (selected != previous) {
-                checks.get(previous).run.accept(0.0);  // stop the device we just left
+            if (gamepad1.xWasPressed() | gamepad2.xWasPressed()) {
+                latched[selected] = latched[selected] == 1 ? 0 : 1;
+            }
+            if (gamepad1.yWasPressed() | gamepad2.yWasPressed()) {
+                latched[selected] = latched[selected] == -1 ? 0 : -1;
+            }
+            if (gamepad1.backWasPressed() | gamepad2.backWasPressed()) {
+                Arrays.fill(latched, 0);
             }
 
+            // A/B override the selected device while held; everything else follows its latch.
             boolean forward = gamepad1.a || gamepad2.a;   // either gamepad works
             boolean backward = gamepad1.b || gamepad2.b;
-            double power = forward ? TEST_POWER : backward ? -TEST_POWER : 0.0;
-            checks.get(selected).run.accept(power);
+            int held = forward ? 1 : backward ? -1 : 0;
 
-            telemetry.addLine("D-pad: pick a device.  Hold A: run forward.  Hold B: run backward.");
-            telemetry.addData("Sticks", "GP1 (%+.2f,%+.2f)  GP2 (%+.2f,%+.2f)   0.00 while moving = pad not registered (Start+A / Start+B)",
-                    gamepad1.left_stick_x, -gamepad1.left_stick_y, gamepad2.left_stick_x, -gamepad2.left_stick_y);
+            telemetry.addLine("D-pad: pick.  Hold A/B: fwd/back.  X/Y: latch fwd/back.  Back: stop all.");
             for (int i = 0; i < checks.size(); i++) {
-                telemetry.addLine((i == selected ? "> " : "   ") + checks.get(i).device);
+                int direction = (i == selected && held != 0) ? held : latched[i];
+                checks.get(i).device.setPower(direction * TEST_POWER);
+                String state = direction > 0 ? "[FWD]" : direction < 0 ? "[BACK]" : "[ off ]";
+                telemetry.addLine((i == selected ? "> " : "   ") + state + " " + checks.get(i).label);
             }
             telemetry.addLine();
             telemetry.addData("Forward should", checks.get(selected).expected);
             telemetry.addLine();
-            drivetrain.addPortTelemetry(telemetry);
-            intake.addPortTelemetry(telemetry);
-            shooter.addPortTelemetry(telemetry);
-            drivetrain.addTelemetry(telemetry);
-            intake.addTelemetry(telemetry);
-            shooter.addTelemetry(telemetry);
+            addPortTelemetry(checks);
             telemetry.update();
+        }
+
+        for (Check c : checks) {
+            c.device.setPower(0.0);
+        }
+    }
+
+    /** Lists the port each device is configured on, to compare with the list at the top of this file. */
+    private void addPortTelemetry(List<Check> checks) {
+        for (Check c : checks) {
+            telemetry.addData(c.label, "port %d", c.port);
         }
     }
 }

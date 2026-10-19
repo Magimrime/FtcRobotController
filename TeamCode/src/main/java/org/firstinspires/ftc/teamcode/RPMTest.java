@@ -6,17 +6,23 @@ import com.qualcomm.robotcore.hardware.CRServo;
 import com.qualcomm.robotcore.hardware.DcMotor;
 import com.qualcomm.robotcore.hardware.DcMotorEx;
 import com.qualcomm.robotcore.hardware.DcMotorSimple;
+import com.qualcomm.robotcore.util.ElapsedTime;
 
 /*
  * Flywheel speed test. Spins the turret (flywheel) at a chosen RPM so you can find the speed that
- * scores, then feeds balls into it with the siphon. No driving.
+ * scores, then feeds balls into it with the siphon. No driving. The flywheel starts spinning as
+ * soon as you press START.
  *
  * Either gamepad works:
- *   Y                    flywheel on / off
- *   D-pad up / down      target +100 / -100 RPM
- *   D-pad right / left   target +25 / -25 RPM
+ *   Y (top button)          faster: target +100 RPM (or +5% power)
+ *   A (bottom button)       weaker: target -100 RPM (or -5% power)
+ *   Right stick up / down   speed up / slow down while held (the further, the faster it changes)
+ *   D-pad up / down         target +100 / -100 RPM
+ *   D-pad right / left      target +25 / -25 RPM
+ *   L1 (left bumper)        flywheel off / on
  *   R2 (right trigger)   hold to run the siphon, which feeds balls into the flywheel
- *   X                    intake motor + both feeders on / off, to load balls
+ *   L2 (left trigger)    press once: intake motor + both feeders ON and they stay on; press again: off
+ *   X                    same as L2
  *   B                    switch between RPM mode (uses the encoder) and plain power mode
  *
  * The screen shows the target and the measured RPM, and says READY when they match. If the
@@ -46,10 +52,13 @@ public class RPMTest extends LinearOpMode {
     private static final double BIG_STEP_RPM = 100.0;   // d-pad up / down
     private static final double SMALL_STEP_RPM = 25.0;  // d-pad right / left
     private static final double READY_RPM = 75.0;       // READY when measured is within this of target
+    private static final double STICK_RATE_RPM = 600.0; // right stick fully up: RPM added per second
     // Power mode:
     private static final double START_POWER = 0.70;
     private static final double BIG_STEP_POWER = 0.05;
     private static final double SMALL_STEP_POWER = 0.01;
+    private static final double STICK_RATE_POWER = 0.30; // right stick fully up: power added per second
+    private static final double STICK_DEADBAND = 0.1;    // ignore the stick inside this
 
     // Speed control inside the hub. F is 32767 / max ticks per second (how much motor power each
     // tick per second needs); P pulls the speed back up after each shot. goBILDA uses about these.
@@ -62,6 +71,7 @@ public class RPMTest extends LinearOpMode {
     private static final double INTAKE_POWER = 1.0;
     private static final double SIPHON_POWER = 1.0;
     private static final double SIPHON_TRIGGER = 0.1;  // right trigger past this = siphon on
+    private static final double INTAKE_TRIGGER = 0.1;  // left trigger past this counts as a press
     private static final DcMotorSimple.Direction FLYWHEEL = DcMotorSimple.Direction.FORWARD;
     private static final DcMotorSimple.Direction INTAKE = DcMotorSimple.Direction.FORWARD;
     private static final DcMotorSimple.Direction LEFT_FEEDER = DcMotorSimple.Direction.FORWARD;
@@ -91,41 +101,55 @@ public class RPMTest extends LinearOpMode {
         String configType = flywheel.getMotorType().getName();
         double configTicks = flywheel.getMotorType().getTicksPerRev();
 
-        telemetry.addLine("RPM Test. Press START, then Y to spin the flywheel.");
+        telemetry.addLine("RPM Test. The flywheel spins up when you press START.");
         telemetry.addData("Config says turret is", "%s, %.0f ticks/rev (this file uses %.0f)",
                 configType, configTicks, FLYWHEEL_TICKS_PER_REV);
         telemetry.update();
         waitForStart();
 
         boolean rpmMode = true;
-        boolean flywheelOn = false;
+        boolean flywheelOn = true;
         boolean intakeOn = false;
+        boolean leftTriggerWasDown = false;  // triggers have no WasPressed(), so remember last loop
         double targetRpm = START_RPM;
         double targetPower = START_POWER;
+        ElapsedTime loopTimer = new ElapsedTime();
 
         while (opModeIsActive()) {
+            double seconds = loopTimer.seconds();  // time since the last loop, for the stick rate
+            loopTimer.reset();
+
             // Buttons. The single | is on purpose: both gamepads get their press cleared.
-            if (gamepad1.yWasPressed() | gamepad2.yWasPressed()) {
+            if (gamepad1.leftBumperWasPressed() | gamepad2.leftBumperWasPressed()) {
                 flywheelOn = !flywheelOn;
             }
-            if (gamepad1.xWasPressed() | gamepad2.xWasPressed()) {
+            // L2 or X: each press flips the intake, and it stays that way until the next press.
+            boolean leftTriggerDown = gamepad1.left_trigger > INTAKE_TRIGGER || gamepad2.left_trigger > INTAKE_TRIGGER;
+            boolean leftTriggerPressed = leftTriggerDown && !leftTriggerWasDown;
+            leftTriggerWasDown = leftTriggerDown;
+            if (leftTriggerPressed | gamepad1.xWasPressed() | gamepad2.xWasPressed()) {
                 intakeOn = !intakeOn;
             }
             if (gamepad1.bWasPressed() | gamepad2.bWasPressed()) {
                 rpmMode = !rpmMode;
                 flywheel.setMode(rpmMode ? DcMotor.RunMode.RUN_USING_ENCODER : DcMotor.RunMode.RUN_WITHOUT_ENCODER);
             }
-            double step = 0.0;
+            double step = 0.0;  // big steps: Y (top button) or d-pad up = faster, A (bottom) or d-pad down = weaker
+            if (gamepad1.yWasPressed() | gamepad2.yWasPressed()) step += 1.0;
+            if (gamepad1.aWasPressed() | gamepad2.aWasPressed()) step -= 1.0;
             if (gamepad1.dpadUpWasPressed() | gamepad2.dpadUpWasPressed()) step += 1.0;
             if (gamepad1.dpadDownWasPressed() | gamepad2.dpadDownWasPressed()) step -= 1.0;
             double smallStep = 0.0;
             if (gamepad1.dpadRightWasPressed() | gamepad2.dpadRightWasPressed()) smallStep += 1.0;
             if (gamepad1.dpadLeftWasPressed() | gamepad2.dpadLeftWasPressed()) smallStep -= 1.0;
+            // Right stick: up is negative on a gamepad, so flip it. Holding it ramps the target.
+            double stickUp = -stick(gamepad1.right_stick_y, gamepad2.right_stick_y);
+            if (Math.abs(stickUp) < STICK_DEADBAND) stickUp = 0.0;
             if (rpmMode) {
-                targetRpm += step * BIG_STEP_RPM + smallStep * SMALL_STEP_RPM;
+                targetRpm += step * BIG_STEP_RPM + smallStep * SMALL_STEP_RPM + stickUp * STICK_RATE_RPM * seconds;
                 targetRpm = Math.max(0.0, Math.min(FLYWHEEL_MAX_RPM, targetRpm));
             } else {
-                targetPower += step * BIG_STEP_POWER + smallStep * SMALL_STEP_POWER;
+                targetPower += step * BIG_STEP_POWER + smallStep * SMALL_STEP_POWER + stickUp * STICK_RATE_POWER * seconds;
                 targetPower = Math.max(0.0, Math.min(1.0, targetPower));
             }
 
@@ -139,7 +163,7 @@ public class RPMTest extends LinearOpMode {
             }
             double measuredRpm = flywheel.getVelocity() * 60.0 / FLYWHEEL_TICKS_PER_REV;
 
-            // Siphon feeds a ball while R2 is held. Intake + feeders load balls while toggled on.
+            // Siphon feeds a ball while R2 is held. Intake + feeders run while toggled on.
             boolean siphonOn = gamepad1.right_trigger > SIPHON_TRIGGER || gamepad2.right_trigger > SIPHON_TRIGGER;
             siphon.setPower(siphonOn ? SIPHON_POWER : 0.0);
             intake.setPower(intakeOn ? INTAKE_POWER : 0.0);
@@ -147,17 +171,17 @@ public class RPMTest extends LinearOpMode {
             rightFeeder.setPower(intakeOn ? INTAKE_POWER : 0.0);
 
             telemetry.addData("Mode", rpmMode ? "RPM (encoder)   [B: power mode]" : "POWER   [B: RPM mode]");
-            telemetry.addData("Flywheel", flywheelOn ? "ON   [Y: off]" : "OFF   [Y: on]");
+            telemetry.addData("Flywheel", flywheelOn ? "ON   [L1: off]" : "OFF   [L1: on]");
             if (rpmMode) {
                 String state = !flywheelOn ? "" : Math.abs(measuredRpm - targetRpm) <= READY_RPM ? "   READY" : "   spinning up";
-                telemetry.addData("Target", "%.0f RPM   [d-pad up/down 100, right/left 25]", targetRpm);
+                telemetry.addData("Target", "%.0f RPM   [Y faster, A weaker (100); right stick; d-pad right/left 25]", targetRpm);
                 telemetry.addData("Measured", "%.0f RPM%s", measuredRpm, state);
             } else {
-                telemetry.addData("Power", "%.0f%%   [d-pad up/down 5, right/left 1]", targetPower * 100.0);
+                telemetry.addData("Power", "%.0f%%   [Y faster, A weaker (5); right stick; d-pad right/left 1]", targetPower * 100.0);
                 telemetry.addData("Measured", "%.0f RPM", measuredRpm);
             }
             telemetry.addData("Siphon", siphonOn ? "ON (R2 held)" : "off   [hold R2 to feed]");
-            telemetry.addData("Intake", intakeOn ? "ON   [X: off]" : "off   [X: on]");
+            telemetry.addData("Intake", intakeOn ? "ON   [L2 or X: off]" : "off   [L2 or X: on]");
             telemetry.addData("Config says turret is", "%s, %.0f ticks/rev", configType, configTicks);
             telemetry.update();
         }
@@ -167,5 +191,10 @@ public class RPMTest extends LinearOpMode {
         intake.setPower(0.0);
         leftFeeder.setPower(0.0);
         rightFeeder.setPower(0.0);
+    }
+
+    /** One stick axis from both gamepads: whichever is pushed further wins. */
+    private static double stick(float pad1, float pad2) {
+        return Math.abs(pad1) >= Math.abs(pad2) ? pad1 : pad2;
     }
 }

@@ -67,7 +67,7 @@ public class RPMTest extends LinearOpMode {
     private static final double PIDF_D = 0.0;
     private static final double PIDF_F = 32767.0 / (FLYWHEEL_MAX_RPM * FLYWHEEL_TICKS_PER_REV / 60.0);
 
-    // Same as RobotTeleOp.
+    // Same as TeleOp.
     private static final double INTAKE_POWER = 1.0;
     private static final double SIPHON_POWER = 1.0;
     private static final double SIPHON_TRIGGER = 0.1;  // right trigger past this = siphon on

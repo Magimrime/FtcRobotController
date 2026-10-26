@@ -1,5 +1,6 @@
 package org.firstinspires.ftc.teamcode;
 
+import com.qualcomm.hardware.lynx.LynxModule;
 import com.qualcomm.hardware.rev.RevHubOrientationOnRobot;
 import com.qualcomm.robotcore.eventloop.opmode.Autonomous;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
@@ -13,7 +14,6 @@ import com.qualcomm.robotcore.util.Range;
 
 import org.firstinspires.ftc.robotcore.external.Telemetry;
 import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
-import org.firstinspires.ftc.robotcore.external.navigation.YawPitchRollAngles;
 
 /*
  * Auto2: shoot, collect the GARDEN, come back, shoot again.
@@ -32,7 +32,7 @@ import org.firstinspires.ftc.robotcore.external.navigation.YawPitchRollAngles;
  * degrees it stops and turns back on the spot before driving on.
  *
  * DEBUG SCREEN (Driver Hub): what it is doing, odometry (position, heading, how far off the line),
- * each wheel's encoder count and whether it works, how the IMU is mounted, and a map.
+ * each wheel's encoder count and whether it works, the IMU and wheel headings, and a map.
  */
 @Autonomous(name = "Auto2", group = "Robot", preselectTeleOp = "TeleOp")
 public class Auto2 extends LinearOpMode {
@@ -54,7 +54,11 @@ public class Auto2 extends LinearOpMode {
     CRServo leftFeeder, rightFeeder, siphon;
     DcMotorEx flywheel;
     IMU imu;
-    String imuMount = "";
+    String imuNote = "";
+    // How the Control Hub is mounted on the robot. If the heading goes the wrong way when the robot
+    // is turned by hand in INIT, change these to match the robot.
+    static final RevHubOrientationOnRobot.LogoFacingDirection HUB_LOGO = RevHubOrientationOnRobot.LogoFacingDirection.UP;
+    static final RevHubOrientationOnRobot.UsbFacingDirection HUB_USB = RevHubOrientationOnRobot.UsbFacingDirection.FORWARD;
 
     // Odometry: inches ahead of and right of the start spot, degrees turned left.
     // plan = where it should be after the last move; target / offLine are for the screen.
@@ -63,21 +67,19 @@ public class Auto2 extends LinearOpMode {
     final double[] power = new double[4], evidence = new double[4], encoderSign = {1, 1, 1, 1};
     final double[] countedTicks = new double[4];
     final boolean[] dead = new boolean[4];
-    double imuSign = 1, imuEvidence = 0;
+    double wheelHeading;  // heading worked out from the wheels alone, as a check on the IMU
     boolean[][] path = new boolean[MAP_ROWS][MAP_COLS];
 
     @Override
     public void runOpMode() {
         telemetry.setDisplayFormat(Telemetry.DisplayFormat.MONOSPACE);  // so the map lines up
-        telemetry.addLine("Checking how the Control Hub is mounted, keep the robot still...");
-        telemetry.update();
         setUp();
-        while (opModeInInit()) {
-            telemetry.addLine("Backward, front against the wall, middle tile in front of the goal (blue D6, red C1).");
-            telemetry.addData("IMU", imuMount);
-            telemetry.update();
-        }
         startOdometry();
+        while (opModeInInit()) {  // live, so odometry can be checked by hand before START
+            updateOdometry();
+            show("INIT: turn it left by hand = heading goes up. Then put it backward, front on the wall, middle tile");
+        }
+        startOdometry();  // the start spot is (0, 0), heading 0
         flywheel.setVelocity(RPM * 28 / 60.0);  // stays on the whole time
 
         // ------------------------------------------------------------ THE PLAN
@@ -222,6 +224,7 @@ public class Auto2 extends LinearOpMode {
 
     // ================================================================ ODOMETRY
 
+    /** Makes where the robot is now the start spot: position (0, 0), heading 0, empty map path. */
     void startOdometry() {
         if (imu != null) {
             imu.resetYaw();
@@ -229,6 +232,9 @@ public class Auto2 extends LinearOpMode {
         for (int i = 0; i < 4; i++) {
             startTicks[i] = lastTicks[i] = wheels[i].getCurrentPosition();
         }
+        posAhead = posRight = heading = wheelHeading = 0;
+        planAhead = planRight = targetAhead = targetRight = offLine = 0;
+        path = new boolean[MAP_ROWS][MAP_COLS];
     }
 
     /** Adds how the robot moved since the last call to its position and heading. */
@@ -265,18 +271,19 @@ public class Auto2 extends LinearOpMode {
 
         double forward = (d[0] + d[1] + d[2] + d[3]) / 4;
         double sideways = (d[0] - d[1] - d[2] + d[3]) / 4;
-        double wheelTurn = Math.toDegrees((-d[0] + d[1] - d[2] + d[3]) / 4 / TURN_RADIUS);
+        // Heading: the IMU, with the wheels working it out too as a check. If they disagree by more
+        // than 25 degrees the IMU can't be trusted (mounted another way than HUB_LOGO / HUB_USB say),
+        // so from then on the heading comes from the wheels.
+        wheelHeading += Math.toDegrees((-d[0] + d[1] - d[2] + d[3]) / 4 / TURN_RADIUS);
         if (imu != null) {
-            double imuHeading = imuSign * imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.DEGREES);
-            // The wheels and the IMU must agree which way it turned; if not, the IMU counts backward.
-            imuEvidence += wheelTurn * (imuHeading - heading);
-            if (imuEvidence < -3 && imuSign > 0) {
-                imuSign = -1;
-                imuHeading = -imuHeading;
+            heading = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.DEGREES);
+            if (opModeIsActive() && Math.abs(heading - wheelHeading) > 25) {  // not in INIT: hand-turning
+                imu = null;
+                imuNote = "IMU disagreed with the wheels: check HUB_LOGO / HUB_USB. Heading from the wheels";
             }
-            heading = imuHeading;
-        } else {
-            heading += wheelTurn;
+        }
+        if (imu == null) {
+            heading = wheelHeading;
         }
         double h = Math.toRadians(heading);
         posAhead += forward * Math.cos(h) + sideways * Math.sin(h);
@@ -316,29 +323,15 @@ public class Auto2 extends LinearOpMode {
         flywheel.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
         flywheel.setVelocityPIDFCoefficients(40, 0, 0, 32767 / (6000 * 28 / 60.0));
 
-        // The IMU only measures turning right if it knows how the Control Hub sits. Try every way
-        // it could sit and keep the one that reads the robot as level (it is flat on the field).
+        for (LynxModule hub : hardwareMap.getAll(LynxModule.class)) {
+            hub.setBulkCachingMode(LynxModule.BulkCachingMode.AUTO);  // all encoders read together, faster
+        }
         imu = hardwareMap.tryGet(IMU.class, "imu");
-        imuMount = "NOT FOUND, heading from the wheels";
-        if (imu == null) {
-            return;
+        if (imu != null) {
+            imu.initialize(new IMU.Parameters(new RevHubOrientationOnRobot(HUB_LOGO, HUB_USB)));
+        } else {
+            imuNote = "NOT FOUND, heading from the wheels";
         }
-        for (RevHubOrientationOnRobot.LogoFacingDirection logo : RevHubOrientationOnRobot.LogoFacingDirection.values()) {
-            for (RevHubOrientationOnRobot.UsbFacingDirection usb : RevHubOrientationOnRobot.UsbFacingDirection.values()) {
-                if (logo.ordinal() / 2 == usb.ordinal() / 2) {
-                    continue;  // both along the same line (e.g. UP and DOWN): not a real way to mount it
-                }
-                imu.initialize(new IMU.Parameters(new RevHubOrientationOnRobot(logo, usb)));
-                sleep(250);
-                YawPitchRollAngles a = imu.getRobotYawPitchRollAngles();
-                if (Math.abs(a.getPitch(AngleUnit.DEGREES)) < 15 && Math.abs(a.getRoll(AngleUnit.DEGREES)) < 15) {
-                    imuMount = "hub logo " + logo + ", USB " + usb;
-                    return;
-                }
-            }
-        }
-        imu = null;  // couldn't tell how it sits: work out the heading from the wheels instead
-        imuMount = "COULDN'T TELL HOW THE HUB SITS (robot flat?), heading from the wheels";
     }
 
     double rpm() {
@@ -351,7 +344,10 @@ public class Auto2 extends LinearOpMode {
         telemetry.addData("Doing", doing);
         telemetry.addData("Odometry", "%+6.1f in ahead %+6.1f in right   heading %+5.1f deg", posAhead, posRight, heading);
         telemetry.addData("Target", "%+6.1f in ahead %+6.1f in right   off the line %+4.1f in", targetAhead, targetRight, offLine);
-        telemetry.addData("IMU", imuMount + (imuSign < 0 ? "  (heading was backward: flipped)" : ""));
+        telemetry.addData("Heading", "IMU %s   wheels say %+5.1f deg", imu != null ? "in use" : "OFF", wheelHeading);
+        if (!imuNote.isEmpty()) {
+            telemetry.addLine("  " + imuNote);
+        }
         String[] names = {"FL", "FR", "BL", "BR"};
         for (int i = 0; i < 4; i++) {
             String status = dead[i] ? "NOT COUNTING (worked out from the others)"

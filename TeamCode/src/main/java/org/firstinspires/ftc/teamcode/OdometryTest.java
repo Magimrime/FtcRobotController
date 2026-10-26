@@ -1,5 +1,6 @@
 package org.firstinspires.ftc.teamcode;
 
+import com.qualcomm.hardware.lynx.LynxModule;
 import com.qualcomm.hardware.rev.RevHubOrientationOnRobot;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
@@ -19,10 +20,14 @@ import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
  *
  * PICK THE ALLIANCE DURING INIT (either gamepad): top button (Y / triangle) = BLUE, right
  * button (B / circle) = RED. The position then starts at that alliance's start spot, the same
- * one the autos use: back of the robot against your alliance wall, facing your HIVE's upward
- * CELL, side about 3 in. from the FLOWER on that wall.
- *   RED    x 8.5, y 64, facing the BLUE wall
- *   BLUE   x 135.5, y 80, facing the RED wall (RED's spot turned half a turn)
+ * one Auto2 uses: backward, front (intake) pressed against the wall behind your HIVE, centered on
+ * the middle tile in front of your goal, launcher facing your upward CELL.
+ *   RED    tile C1: x 60, y 8.5, front facing the audience wall (heading -90)
+ *   BLUE   tile D6: x 84, y 135.5, front facing the back wall (heading 90)
+ *
+ * FIRST drive a little with the sticks: that is how it finds out which way each wheel's encoder
+ * counts (the back right one counts backward because that motor is wired the other way) and
+ * whether one isn't counting at all. The "Wheel" lines say "?" until then.
  *
  * Position is on the real field, in inches, seen from the audience:
  *   X          from the RED wall toward the BLUE wall (0 to 144)
@@ -37,11 +42,11 @@ import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
  * every tile. One column is 6 in., one row is 12 in. (text is about twice as tall as wide).
  * Each wheel's distance is shown in inches too, next to its encoder count.
  *
- * How to check it: push the robot 24 inches toward the BLUE wall by hand and X should go up by
- * 24. Push it 24 inches toward the back wall and Y should go up by 24. Turn it a quarter turn to
- * the left and the heading should go up by 90. If a distance is off by a constant factor, fix WHEEL_DIAMETER_MM or
- * TICKS_PER_REV below. If the encoder counts at the bottom of the screen stay at 0 while the
- * wheels turn, the encoder cables are not plugged into the Control Hub.
+ * How to check it (after driving a little): put it back on the start spot, press triangle, then
+ * drive it 24 inches toward the BLUE wall: X should go up by 24. 24 inches toward the back wall:
+ * Y should go up by 24. A quarter turn to the left: the heading should go up by 90. If a distance
+ * is off by a constant factor, fix WHEEL_DIAMETER_MM or TICKS_PER_REV below. A wheel that says
+ * NOT COUNTING has its encoder cable unplugged or in the wrong port.
  *
  * Mecanum wheels slip sideways, so strafing reads a little short. That is normal for wheel
  * odometry; driving over a game element throws it off too.
@@ -70,12 +75,11 @@ public class OdometryTest extends LinearOpMode {
     private static final double MM_PER_TICK = Math.PI * WHEEL_DIAMETER_MM / TICKS_PER_REV;
     private static final double MM_PER_INCH = 25.4;
 
-    // RED start spot, inches. The back of the robot is on the wall, so x is half its length.
-    // Change RED_START_Y if you start somewhere else along the wall. BLUE's spot is this one
-    // turned half a turn about the middle of the field.
+    // RED start spot, inches: the middle of tile C1, front against the audience wall, so y is half
+    // the robot's length. BLUE's spot is this one turned half a turn about the middle of the field.
     private static final double ROBOT_LENGTH_IN = 17.0;
-    private static final double RED_START_X = ROBOT_LENGTH_IN / 2.0;
-    private static final double RED_START_Y = 64.0;
+    private static final double RED_START_X = 60.0;
+    private static final double RED_START_Y = ROBOT_LENGTH_IN / 2.0;
     private static final double FIELD_IN = 144.0;
 
     // The map: the whole field, 24 columns of 6 in. and 12 rows of 12 in.
@@ -102,7 +106,11 @@ public class OdometryTest extends LinearOpMode {
         topRight.setDirection(TOP_RIGHT);
         bottomLeft.setDirection(BOTTOM_LEFT);
         bottomRight.setDirection(BOTTOM_RIGHT);
-        for (DcMotor wheel : new DcMotor[] {topLeft, topRight, bottomLeft, bottomRight}) {
+        for (LynxModule hub : hardwareMap.getAll(LynxModule.class)) {
+            hub.setBulkCachingMode(LynxModule.BulkCachingMode.AUTO);  // all encoders read together, faster
+        }
+        DcMotor[] wheels = {topLeft, topRight, bottomLeft, bottomRight};
+        for (DcMotor wheel : wheels) {
             wheel.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
             wheel.setMode(DcMotor.RunMode.STOP_AND_RESET_ENCODER);  // counts start at 0
             wheel.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);     // drive feels like TeleOp
@@ -123,7 +131,8 @@ public class OdometryTest extends LinearOpMode {
             if (gamepad1.b || gamepad2.b) blue = false;
             telemetry.addLine("=====  ALLIANCE: " + (blue ? "BLUE" : "RED") + "  =====");
             telemetry.addLine("Top button (Y / triangle) = BLUE.  Right button (B / circle) = RED.");
-            telemetry.addLine("Put the robot on the " + (blue ? "BLUE" : "RED") + " start spot, then press START.");
+            telemetry.addLine("Start spot: backward, front against the wall behind your goal, middle tile ("
+                    + (blue ? "BLUE D6" : "RED C1") + "). Then START and drive a little first.");
             telemetry.addData("IMU", imu != null ? "found" : "NOT in configuration, heading will come from the encoders");
             telemetry.update();
         }
@@ -134,7 +143,8 @@ public class OdometryTest extends LinearOpMode {
         // The start spot on the field: inches and radians. BLUE's is RED's turned half a turn.
         double startX = blue ? FIELD_IN - RED_START_X : RED_START_X;
         double startY = blue ? FIELD_IN - RED_START_Y : RED_START_Y;
-        double startHeading = blue ? Math.PI : 0.0;  // facing the other alliance's wall
+        // Front facing the wall behind the HIVE: RED faces the audience wall, BLUE the back wall.
+        double startHeading = blue ? Math.PI / 2 : -Math.PI / 2;
         int[] startCell = mapCell(startX, startY);
 
         // Where the robot is on the field: mm from the RED wall, mm from the audience wall,
@@ -143,10 +153,17 @@ public class OdometryTest extends LinearOpMode {
         double y = startY * MM_PER_INCH;
         double heading = startHeading;
         double encoderHeading = 0.0;  // turn since the start from the wheels alone, for comparison
-        int prevFL = topLeft.getCurrentPosition();
-        int prevFR = topRight.getCurrentPosition();
-        int prevBL = bottomLeft.getCurrentPosition();
-        int prevBR = bottomRight.getCurrentPosition();
+        int[] prev = new int[4];
+        for (int i = 0; i < 4; i++) {
+            prev[i] = wheels[i].getCurrentPosition();
+        }
+        // Each wheel: power sent x ticks counted, added up. Positive = its encoder counts the way
+        // the wheel is driven; negative = it counts backward, so its counts get flipped.
+        double[] evidence = new double[4];
+        double[] sign = {1, 1, 1, 1};
+        double[] counted = new double[4];
+        boolean[] dead = new boolean[4];
+        double[] lastPower = new double[4];
         boolean[][] path = new boolean[MAP_ROWS][MAP_COLS];  // map squares the robot has been in
 
         while (opModeIsActive()) {
@@ -173,19 +190,39 @@ public class OdometryTest extends LinearOpMode {
             bottomLeft.setPower(bl);
             bottomRight.setPower(br);
 
-            // Odometry: how far each wheel turned since the last loop, in mm.
-            int ticksFL = topLeft.getCurrentPosition();
-            int ticksFR = topRight.getCurrentPosition();
-            int ticksBL = bottomLeft.getCurrentPosition();
-            int ticksBR = bottomRight.getCurrentPosition();
-            double dFL = (ticksFL - prevFL) * MM_PER_TICK;
-            double dFR = (ticksFR - prevFR) * MM_PER_TICK;
-            double dBL = (ticksBL - prevBL) * MM_PER_TICK;
-            double dBR = (ticksBR - prevBR) * MM_PER_TICK;
-            prevFL = ticksFL;
-            prevFR = ticksFR;
-            prevBL = ticksBL;
-            prevBR = ticksBR;
+            // Odometry: how far each wheel rolled since the last loop, in mm. Until a wheel has
+            // been driven enough to know which way its encoder counts, assume it turned the way
+            // it was driven, so a backward encoder can't fake a sideways slide.
+            int[] ticks = new int[4];
+            double[] d = new double[4];
+            for (int i = 0; i < 4; i++) {
+                ticks[i] = wheels[i].getCurrentPosition();
+                int moved = ticks[i] - prev[i];
+                prev[i] = ticks[i];
+                evidence[i] += lastPower[i] * moved;
+                boolean known = Math.abs(evidence[i]) > 30;
+                if (known) {
+                    sign[i] = Math.signum(evidence[i]);
+                }
+                d[i] = (known || lastPower[i] == 0 ? moved * sign[i] : Math.abs(moved) * Math.signum(lastPower[i])) * MM_PER_TICK;
+                counted[i] += Math.abs(moved);
+            }
+            lastPower = new double[] {fl, fr, bl, br};
+            // An encoder that hardly counts while the others have rolled a couple of inches isn't
+            // working; its wheel is worked out from the other three (front pair = back pair).
+            double total = counted[0] + counted[1] + counted[2] + counted[3];
+            for (int i = 0; i < 4; i++) {
+                double others = (total - counted[i]) / 3;
+                dead[i] = others > 100 && counted[i] < 0.1 * others;
+            }
+            if (dead[0]) d[0] = d[2] + d[3] - d[1];
+            if (dead[1]) d[1] = d[2] + d[3] - d[0];
+            if (dead[2]) d[2] = d[0] + d[1] - d[3];
+            if (dead[3]) d[3] = d[0] + d[1] - d[2];
+            double dFL = d[0];
+            double dFR = d[1];
+            double dBL = d[2];
+            double dBR = d[3];
 
             // Mecanum forward kinematics: the reverse of the fl/fr/bl/br formulas above.
             double dForward = (dFL + dFR + dBL + dBR) / 4.0;
@@ -225,11 +262,12 @@ public class OdometryTest extends LinearOpMode {
                     Math.toDegrees(wrap(heading)), Math.toDegrees(wrap(startHeading + encoderHeading)));
             showMap(cell, startCell, Math.toDegrees(wrap(heading)), path);
             telemetry.addData("Heading from", imu != null ? "IMU" : "encoders only (no IMU)");
-            telemetry.addData("Position mm", "X %+.0f   Y %+.0f", x, y);
-            telemetry.addData("Wheel inches", "FL %+.1f  FR %+.1f  BL %+.1f  BR %+.1f",
-                    inches(ticksFL), inches(ticksFR), inches(ticksBL), inches(ticksBR));
-            telemetry.addData("Encoders", "FL %d  FR %d  BL %d  BR %d", ticksFL, ticksFR, ticksBL, ticksBR);
-            telemetry.addData("Wheels", "FL %.2f  FR %.2f  BL %.2f  BR %.2f", fl, fr, bl, br);
+            String[] names = {"FL", "FR", "BL", "BR"};
+            for (int i = 0; i < 4; i++) {
+                String status = dead[i] ? "NOT COUNTING (cable?)" : Math.abs(evidence[i]) <= 30 ? "? drive a little"
+                        : sign[i] < 0 ? "counts BACKWARD (fixed)" : "ok";
+                telemetry.addData("Wheel " + names[i], "%+7.1f in  %6d ticks  %s", inches(ticks[i]) * sign[i], ticks[i], status);
+            }
             telemetry.addLine("Triangle = robot is back on the start spot, start over");
             telemetry.update();
         }

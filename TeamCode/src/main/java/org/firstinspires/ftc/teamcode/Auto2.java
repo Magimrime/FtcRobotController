@@ -21,8 +21,9 @@ import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
  * START: backward in the middle of the wall behind our HIVE (blue: tile D6, red: tile C1), front
  * (intake) pressed against the wall, back (launcher) facing our upward CELL. It never turns.
  * ROUTE (straight lines, from the drawing): back 21, right 30, straight to 10 in. in front of the
- * GARDEN corner, forward into it with the intake on, then the same lines back and forward into the
- * wall, so it ends where it started, ready to shoot.
+ * GARDEN corner, forward into it with the intake on. Home: back off the wall 3 in., slide left
+ * along the wall until in line with the start spot, then forward until pressed against the wall,
+ * where it started, and shoot.
  *
  * BLOCKS: forward(n)  back(n)  left(n)  right(n)  goTo(ahead, right)  shoot()  spinSiphon(turns)  setIntake(power)
  *
@@ -39,13 +40,14 @@ public class Auto2 extends LinearOpMode {
 
     // Route, inches from the start spot.
     static final double CORNER_BACK = 21, CORNER_RIGHT = 30, GARDEN_RIGHT = 50, GARDEN_APPROACH = 10;
+    static final double WALL_GAP = 3;  // how far it backs off the wall to slide home along it
 
     // Shooting. The siphon can't count its turns: if it does too many or too few, change SECONDS_PER_TURN.
     static final double RPM = 2800, SIPHON_POWER = 0.3, SECONDS_PER_TURN = 1.5;
 
-    // Driving: slow and careful.
-    static final double DRIVE_POWER = 0.3, MIN_POWER = 0.18, MAX_TWIST = 10;
-    static final double LINE_GAIN = 0.04, MAX_LINE_FIX = 0.06;        // gentle steering back onto the line
+    // Driving: always full speed while moving.
+    static final double DRIVE_POWER = 1.0, MAX_TWIST = 10;
+    static final double LINE_GAIN = 0.04, MAX_LINE_FIX = 0.15;        // gentle steering back onto the line
     static final double INCH_PER_TICK = Math.PI * 96 / 25.4 / 537.7;  // 96 mm wheels, 537.7 ticks/turn
     static final double TURN_RADIUS = (350 + 300) / 2.0 / 25.4;      // inches, for turning from the wheels
 
@@ -107,18 +109,18 @@ public class Auto2 extends LinearOpMode {
         setIntake(1);
         forward(inches);  // stops when the wall stops it
         ElapsedTime timer = new ElapsedTime();
-        while (opModeIsActive() && timer.seconds() < 0.5) {
+        while (opModeIsActive() && timer.seconds() < 0.25) {
             updateOdometry();
             show("collecting");
         }
         setIntake(0);
     }
 
+    /** From the GARDEN: back off the wall a tiny bit, slide along it to the start spot, push onto the wall. */
     void returnToStart() {
-        goTo(-GARDEN_APPROACH, GARDEN_RIGHT);
-        goTo(-CORNER_BACK, CORNER_RIGHT);
-        left(CORNER_RIGHT);
-        forward(CORNER_BACK + 3);  // 3 in. past the wall, so it ends up pressed against it
+        back(WALL_GAP);            // a tiny bit off the wall
+        left(planRight);           // straight along the wall, back in line with the start spot
+        forward(WALL_GAP + 3);     // 3 in. past the wall, so it ends up pressed against it
         posAhead = planAhead = 0;  // touching the wall = exactly the start distance
     }
 
@@ -131,8 +133,8 @@ public class Auto2 extends LinearOpMode {
 
     /**
      * Drives along the straight line from where it should be now to a spot (inches ahead of /
-     * right of the start). Speed comes from how far along the line it has got (slowing near the
-     * end); if odometry says it has drifted off the line it steers back gently, never diagonally.
+     * right of the start) at full speed, measuring with odometry how far along the line it has got;
+     * if it has drifted off the line it steers back gently, never diagonally.
      * Stops early if something (a wall) stops it; the next move then starts from where it really is.
      */
     void goTo(double ahead, double right) {
@@ -166,13 +168,13 @@ public class Auto2 extends LinearOpMode {
             }
             if (Math.abs(heading) > MAX_TWIST) {
                 // Twisted too far: stop driving and turn back on the spot first, never both at once.
-                double turn = Range.clip(0.01 * heading, -0.35, 0.35);
+                double turn = Range.clip(0.01 * heading, -0.6, 0.6);
                 setWheels(0, 0, Math.abs(turn) < 0.12 ? Math.copySign(0.12, turn) : turn);
                 stuck.reset();
                 show("straightening up");
                 continue;
             }
-            double speed = Range.clip(DRIVE_POWER * toGo / 8, MIN_POWER, DRIVE_POWER);
+            double speed = DRIVE_POWER;  // always full speed
             double fix = Range.clip(LINE_GAIN * offLine, -MAX_LINE_FIX, MAX_LINE_FIX);
             double goAhead = lineAhead * speed + lineRight * fix;  // along the line, plus a nudge back to it
             double goRight = lineRight * speed - lineAhead * fix;
@@ -188,8 +190,8 @@ public class Auto2 extends LinearOpMode {
     }
 
     /**
-     * Waits for the flywheel (2 s at most), then the siphon: 3 turns forward, a quarter turn
-     * backward, 2 turns forward. The intake helps push the balls up the whole time.
+     * Waits for the flywheel (2 s at most), then the siphon: 1 turn forward (all 4 balls), a quarter turn
+     * backward, then half a turn more forward to be safe. The intake helps push the balls up the whole time.
      */
     void shoot() {
         ElapsedTime timer = new ElapsedTime();
@@ -198,9 +200,9 @@ public class Auto2 extends LinearOpMode {
             show("flywheel speeding up");
         }
         setIntake(1);
-        spinSiphon(3);
+        spinSiphon(1);   // one turn shoots all 4 balls
         spinSiphon(-0.25);
-        spinSiphon(2);
+        spinSiphon(0.5); // safety: makes sure every ball is out
         setIntake(0);
     }
 

@@ -110,6 +110,11 @@ public class Auto3 extends LinearOpMode {
     static final String CAMERA_NAME = "limelight";  // its name in the Robot Configuration
     static final int PIPE_TAGS = 1;              // the Limelight pipeline that finds AprilTags
     static final double TAG_EXPOSURE = 1500, TAG_GAIN = 30;  // Limelight settings for that pipeline, as in Auto4
+    // How small a tag the Limelight still finds: it shrinks the picture by this before it searches it.
+    // 1 = not shrunk = finds tags about twice as far (or as sideways) as 2, at about 45 instead of
+    // 55 pictures a second. The camera can't turn and the robot stands still to look, so range wins.
+    // Choices 1, 1.5, 2, 3, 4 ("Detector Downscale" on the Limelight page). As in Auto4.
+    static final double TAG_DOWNSCALE = 1;
     static final double CAMERA_BACK = 8.0;       // inches the camera is behind the robot's middle
     static final double CAMERA_PITCH = 15.0;     // degrees it is tilted up (negative = down)
     static final double AIM_TRIM = 0.0;          // degrees. Shots land right of the CELL: make it +. Left: -.
@@ -780,7 +785,8 @@ public class Auto3 extends LinearOpMode {
             // Like Auto4: make pipeline PIPE_TAGS the AprilTag finder for the 3.25 in. (82.55 mm) HIVE
             // tags. The Limelight stays on that pipeline for the whole of Auto3.
             String type = makePipeline(PIPE_TAGS, "pipe_fiducial", "{\"desc\":\"tags\",\"fiducial_size\":82.55,"
-                    + "\"exposure\":" + TAG_EXPOSURE + ",\"sensor_gain\":" + TAG_GAIN + "}");
+                    + "\"exposure\":" + TAG_EXPOSURE + ",\"sensor_gain\":" + TAG_GAIN
+                    + ",\"fiducial_resdiv\":" + TAG_DOWNSCALE + "}");
             if (!"pipe_fiducial".equals(type)) {
                 cameraSetup = "Limelight pipeline " + PIPE_TAGS + " is \"" + type + "\", NOT pipe_fiducial: no tags will be found";
             }

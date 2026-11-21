@@ -67,7 +67,7 @@ import java.util.TreeSet;
  *                        line is one whose tags the CAMERA did not find (no green box on them in the
  *                        Camera Stream): they are too small in the picture (far away), seen too much
  *                        from the side, or hidden. Go closer or face that CELL: from the red side the
- *                        red CELLS are the near ones. TAG_DOWNSCALE below is how small it still finds.
+ *                        red CELLS are the near ones. Auto3.TAG_DOWNSCALE is how small it still finds.
  *   YELLOW POLLEN: ...   how many blobs of that color, in how many of the pictures (20 of 20 = steady,
  *   RED NECTAR: ...      3 of 20 = flickering: tune the color), then for the BIGGEST blob: degrees
  *   BLUE NECTAR: ...     left / right, degrees up / down, how much of the picture it fills, and a ROUGH
@@ -152,15 +152,11 @@ public class CameraDetection extends LinearOpMode {
     static final double TAG_SIZE_MM = 82.55;        // the 3.25 in. HIVE tags
     static final double TAG_TOO_FAR = 90;           // inches: a tag further behind than this is not trusted
     static final int FIRST_TAG = 30, LAST_TAG = 45; // 4 CELLS x 4 tags
-    // HOW SMALL A TAG THE CAMERA STILL FINDS. A far CELL, or one seen from the side, is only a few
-    // pixels in the picture. To be fast the camera shrinks the picture before it searches it:
-    // 2 = to half size, 1 = not shrunk. With 1 it finds tags about half as big (about twice as far)
-    // and gives fewer pictures a second. Choices: 1, 1.5, 2, 3, 4. It is the "Detector Downscale"
-    // on the Limelight web page. It is stored in the tag slot, the one the autos use, so they get
-    // it too. BELIEVED, NOT YET CHECKED: its name on the camera (fiducial_resdiv, in setUp). The
-    // SETUP line of slot 1 says whether the camera took it.
-    static final double TAG_DOWNSCALE = 1;
-    // From Auto3 itself, so they can never differ: CAMERA_NAME, PIPE_TAGS, TAG_EXPOSURE, TAG_GAIN,
+    // HOW SMALL A TAG THE CAMERA STILL FINDS is Auto3.TAG_DOWNSCALE: a far CELL, or one seen from the
+    // side, is only a few pixels in the picture, and the camera shrinks the picture by that before
+    // it searches it (1 = not shrunk = the longest range). Its name on the camera, fiducial_resdiv,
+    // is believed, not checked: the SETUP line of slot 1 says whether the camera took it.
+    // From Auto3 itself, so they can never differ: CAMERA_NAME, PIPE_TAGS, TAG_EXPOSURE, TAG_GAIN, TAG_DOWNSCALE,
     // CAMERA_BACK, CAMERA_PITCH, AIM_TRIM, AIM_MAX, FAR_CELL, CELLS, TAG_PLACE.
 
     // Which stored settings Y shows: every setting whose name has one of these in it.
@@ -557,11 +553,11 @@ public class CameraDetection extends LinearOpMode {
             telemetry.addLine("Setting up the camera: slot " + look.slot + " " + look.name + " ...");
             telemetry.update();
             ColorRow row = look.row;
-            // The tag slot gets what Auto3 gives it (same as Auto3.setUp, keep equal), and TAG_DOWNSCALE.
+            // The tag slot gets exactly what Auto3 gives it (same as Auto3.setUp, keep equal).
             look.setup = row == null
                     ? setUpSlot(look.slot, "pipe_fiducial", json("desc", "tags", "fiducial_size", TAG_SIZE_MM,
                             "exposure", Auto3.TAG_EXPOSURE, "sensor_gain", Auto3.TAG_GAIN,
-                            "fiducial_resdiv", TAG_DOWNSCALE))
+                            "fiducial_resdiv", Auto3.TAG_DOWNSCALE))
                     : setUpSlot(look.slot, "pipe_color", json("desc", row.name,
                             "hue_min", row.hueFrom, "hue_max", row.hueTo, "invert_hue", row.outside ? 1 : 0,
                             "sat_min", row.satFrom, "sat_max", row.satTo, "val_min", row.valFrom, "val_max", row.valTo,

@@ -277,6 +277,18 @@ public class Auto5 extends LinearOpMode {
     static final int MAX_REPLANS = 2;
     static final double TURN_ROOM = 13;     // inches from the robot's middle to anything for a turn on the spot (half diagonal 12)
     static final double LEAVE_WALL = 4;     // inches it backs straight off a wall before it plans a move
+    static final double ARRIVED = 2.5;      // inches: stopping this close to the end of a move counts as arrived, not as a hit
+    // THE GARDEN: it keeps pressing into the near wall (and a bit toward our alliance wall) with the
+    // intake on for GARDEN_PRESS seconds, so it takes in every ball along the wall (Jin, after run 4).
+    static final double GARDEN_PRESS = 1.2, PRESS_POWER = 0.3;
+    // THE CAMERA MOVED (run 4: after ramming the GARDEN corner the webcam pointed lower; the tags it
+    // knew all looked ~9 in. higher, even blue's, and it took that as our CELL going down). The heights
+    // of every tag seen from a shooting spot are remembered; if, from that spot again, the tags of
+    // the other alliance moved more than TIP_MOVE, our shot can't have done that: the camera moved,
+    // and the look counts as "can't tell".
+    // NO TAGS AT ALL from a shooting spot: it turns SCAN_STEP, then the other way, ... up to SCAN_MAX
+    // degrees, looking each time, to find the HIVE again before it decides or aims.
+    static final double SCAN_STEP = 15, SCAN_MAX = 30;
     static final double HEADING_OFF = 4;    // degrees: further off its heading than this, it turns back before driving
     static final RevHubOrientationOnRobot.LogoFacingDirection HUB_LOGO = RevHubOrientationOnRobot.LogoFacingDirection.UP;
     static final RevHubOrientationOnRobot.UsbFacingDirection HUB_USB = RevHubOrientationOnRobot.UsbFacingDirection.FORWARD;
@@ -301,6 +313,12 @@ public class Auto5 extends LinearOpMode {
     String upFrom = ""; // why it thinks so, for the screen
     boolean crossedSinceShot;
     boolean crossedBack;  // already crossed back once because the CELL on that side was down
+    final double[][] spotTagUp = new double[3][16];  // per spot (NEAR, FAR, SIDE), how high each tag looked from there first
+    {
+        for (double[] a : spotTagUp) {
+            java.util.Arrays.fill(a, Double.NaN);
+        }
+    }
     double hiveShiftY;    // where the camera saw our CELLs minus where the code assumes them, along the field (inches)
     final List<double[]> bumps = new ArrayList<>();  // spots {X, Y} where the robot hit something
     boolean watchHits;    // driveLine: watch for a hit (planned moves only, not a push into a wall)
@@ -651,8 +669,8 @@ public class Auto5 extends LinearOpMode {
             hit = false;
             drivePath(way.toArray(new double[0][]), false);
             watchHits = false;
-            if (!hit) {
-                return true;
+            if (!hit || Math.hypot(gx - posX, gy - posY) < ARRIVED) {
+                return true;  // a "hit" right at the goal is just arriving
             }
             // Hit something: back off the way it came, mark the spot just past its edge, plan round it.
             double bx = hitX + hitDirX * (ROBOT_HALF + 1), by = hitY + hitDirY * (ROBOT_HALF + 1);
@@ -860,10 +878,14 @@ public class Auto5 extends LinearOpMode {
         planY = posY;
         drivePath(new double[][] {corner}, true);  // into the corner: the walls stop it
         ElapsedTime timer = new ElapsedTime();
-        while (opModeIsActive() && timer.seconds() < 0.25) {  // pressed on the wall: let the balls in
+        logRow("cmd", String.format(Locale.US, "pressing into the GARDEN wall for %.1f s, intake on", GARDEN_PRESS));
+        while (opModeIsActive() && timer.seconds() < GARDEN_PRESS) {  // keep pressing on the wall: every ball in
             updateOdometry();
-            show("collecting");
+            // forward = into the near wall, right = toward our alliance wall (the corner), holding the heading
+            setWheels(PRESS_POWER, PRESS_POWER / 2, Range.clip(TWIST_GAIN * wrapDegrees(heading - planHeading), -MAX_TWIST_FIX, MAX_TWIST_FIX));
+            show("collecting: pressed on the wall");
         }
+        setWheels(0, 0, 0);
         setIntake(0);
         posY = planY = ROBOT_HALF;  // front pressed on the near wall
         posX = planX = ROBOT_SIDE;  // right side pressed on our alliance wall
@@ -889,6 +911,9 @@ public class Auto5 extends LinearOpMode {
         ElapsedTime timer = new ElapsedTime();
         if (portal != null) {
             lookAtHive("is the " + cell + " CELL up?");
+            if (tagsInLook() == 0 && pictures >= MIN_PICTURES) {
+                scanForHive();  // no tags at all: turn to find the HIVE, then decide and aim from what it sees
+            }
             int seen = behindState(behind, upHeight);
             note("before shot " + (tips + 1) + ": " + upNote);
             if (seen != UP_UNKNOWN && seen != behind && CAMERA_DECIDES) {
@@ -1237,6 +1262,9 @@ public class Auto5 extends LinearOpMode {
                 furthest = Math.max(furthest, along);
                 stuck.reset();
             } else if (stuck.seconds() > 0.6) {
+                if (easeIn && Math.hypot(toGo, offLine) < ARRIVED) {
+                    break;  // run 4: stalled 1 in. short of the end = there, not a hit
+                }
                 blocked = true;
                 why = "stopped getting further";
                 break;
@@ -1628,6 +1656,10 @@ public class Auto5 extends LinearOpMode {
             upNote = "only " + pictures + " pictures from the webcam -> " + UP_NAMES[UP_UNKNOWN];
             return UP_UNKNOWN;
         }
+        if (cameraMoved()) {
+            upNote = cameraNote + " -> " + UP_NAMES[UP_UNKNOWN];
+            return UP_UNKNOWN;
+        }
         if (Double.isNaN(reference)) {
             return whichIsUp();  // nothing to compare with yet
         }
@@ -1650,6 +1682,56 @@ public class Auto5 extends LinearOpMode {
         upNote = String.format(Locale.US, "%s CELL: %d tags at %.1f in. high, %+.1f from %.1f when up -> %s",
                 name, c.tags, c.up, moved, reference, UP_NAMES[answer]);
         return answer;
+    }
+
+    /**
+     * No tags at all from a shooting spot: turns SCAN_STEP one way, then the other, then further (up
+     * to SCAN_MAX), looking each time, until it sees HIVE tags. Its front is on the wall, so it turns
+     * by backing one side off it. True if it found them (the last look is then that one).
+     */
+    boolean scanForHive() {
+        double start = planHeading;
+        for (double a : new double[] {SCAN_STEP, -SCAN_STEP, 2 * SCAN_STEP, -2 * SCAN_STEP}) {
+            if (Math.abs(a) > SCAN_MAX || !opModeIsActive()) {
+                continue;
+            }
+            turnTo(start + a, 1.0, true);
+            lookAtHive(String.format(Locale.US, "no tags: looking for the HIVE %.0f deg %s", Math.abs(a), a > 0 ? "left" : "right"));
+            if (tagsInLook() > 0) {
+                note(String.format(Locale.US, "  found the HIVE %.0f deg %s of where it should be", Math.abs(a), a > 0 ? "left" : "right"));
+                return true;
+            }
+        }
+        note("  no HIVE tags anywhere in the scan");
+        turnTo(start, 1.0, true);
+        return false;
+    }
+
+    /**
+     * Did the CAMERA move (knocked, tilted) rather than our HIVE? The other alliance's tags, seen
+     * from this same spot before, can't move because of our shots: if they now look more than
+     * TIP_MOVE higher or lower, it did. The first time a tag is seen from a spot, its height is kept.
+     */
+    boolean cameraMoved() {
+        int ours1 = nearCellIndex(), ours2 = farCellIndex();
+        boolean moved = false;
+        for (int i = 0; i < 16; i++) {
+            double[] t = tagSeen[i];
+            if (t[3] == 0) {
+                continue;
+            }
+            double up = t[2] / t[3];
+            double ref = spotTagUp[spot][i];
+            int cell = i / 4;
+            if (Double.isNaN(ref)) {
+                spotTagUp[spot][i] = up;
+            } else if (cell != ours1 && cell != ours2 && Math.abs(up - ref) > TIP_MOVE) {
+                cameraNote = String.format(Locale.US, "tag %d (other alliance) is %.1f in. %s than from here before: the camera moved",
+                        30 + i, Math.abs(up - ref), up > ref ? "higher" : "lower");
+                moved = true;
+            }
+        }
+        return moved;
     }
 
     /** How many different HIVE tags (any CELL, either alliance) the last look saw. */

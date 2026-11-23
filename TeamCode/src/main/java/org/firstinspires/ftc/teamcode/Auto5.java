@@ -1131,25 +1131,37 @@ public class Auto5 extends LinearOpMode {
             return;  // no new picture since last time
         }
         pictures++;
+        logRow("pic", String.format(Locale.US, "picture %d of this look: %d tags", pictures, found.size()));
         double pitch = Math.toRadians(CAMERA_PITCH);
         for (AprilTagDetection tag : found) {
-            if (!(tag instanceof AprilTagSingleDetection) || tag.rawPose == null) {
+            if (!(tag instanceof AprilTagSingleDetection)) {
                 continue;
             }
-            int id = ((AprilTagSingleDetection) tag).id;
-            if (id < 30 || id > 45) {
-                continue;  // not a HIVE tag
+            AprilTagSingleDetection one = (AprilTagSingleDetection) tag;
+            int id = one.id;
+            if (id < 30 || id > 45 || tag.rawPose == null) {
+                logRow("tag", String.format(Locale.US, "id %d at pixel %.0f %.0f: not a HIVE tag, not used", id, one.center.x, one.center.y));
+                continue;
             }
             // Camera space: x right, y down, z straight out of the lens, in inches. The same as the
             // Limelight's in Auto4, so the same math.
             double x = tag.rawPose.x, y = tag.rawPose.y, z = tag.rawPose.z;
             double behind = CAMERA_BACK + z * Math.cos(pitch) + y * Math.sin(pitch);
-            if (z <= 0 || behind > 90) {
-                continue;  // no 3D position, or too far to trust
+            double up = CAMERA_HEIGHT + z * Math.sin(pitch) - y * Math.cos(pitch);
+            boolean use = z > 0 && behind <= 90;  // no 3D position, or too far to trust: not used
+            // Everything the tag finder said about this tag, and what Auto5 made of it.
+            logRow("tag", String.format(Locale.US, "id %d %s at pixel %.0f %.0f, margin %.0f, hamming %d;"
+                            + " camera x %.2f y %.2f z %.2f in.; range %.1f in. bearing %.1f elevation %.1f yaw %.1f deg;"
+                            + " -> behind %.1f right %.1f up %.1f in.%s",
+                    id, CELLS[(id - 30) / 4], one.center.x, one.center.y, one.decisionMargin, one.hamming,
+                    x, y, z, tag.ftcPose.range, tag.ftcPose.bearing, tag.ftcPose.elevation, tag.ftcPose.yaw,
+                    behind, -x, up, use ? "" : " NOT USED (too far / behind the camera)"));
+            if (!use) {
+                continue;
             }
             tagSeen[id - 30][0] += behind;
             tagSeen[id - 30][1] -= x;  // the camera looks backward: its right is the robot's left
-            tagSeen[id - 30][2] += CAMERA_HEIGHT + z * Math.sin(pitch) - y * Math.cos(pitch);
+            tagSeen[id - 30][2] += up;
             tagSeen[id - 30][3]++;
         }
     }

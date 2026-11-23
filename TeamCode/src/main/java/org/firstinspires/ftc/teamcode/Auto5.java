@@ -910,6 +910,11 @@ public class Auto5 extends LinearOpMode {
         double pathHeading = planHeading;
         ElapsedTime timer = new ElapsedTime();
         if (portal != null) {
+            ElapsedTime wait = new ElapsedTime();  // run 5: START came before the webcam was streaming
+            while (opModeIsActive() && portal.getCameraState() != VisionPortal.CameraState.STREAMING && wait.seconds() < 2) {
+                updateOdometry();
+                show("waiting for the webcam to start");
+            }
             lookAtHive("is the " + cell + " CELL up?");
             if (tagsInLook() == 0 && pictures >= MIN_PICTURES) {
                 scanForHive();  // no tags at all: turn to find the HIVE, then decide and aim from what it sees
@@ -1691,11 +1696,14 @@ public class Auto5 extends LinearOpMode {
      */
     boolean scanForHive() {
         double start = planHeading;
+        // Run 5: turning by backing one side off the wall moved the robot 40 in. away over the scan.
+        // Now it backs off the wall once and turns on the spot.
+        leaveWall(LEAVE_WALL);
         for (double a : new double[] {SCAN_STEP, -SCAN_STEP, 2 * SCAN_STEP, -2 * SCAN_STEP}) {
             if (Math.abs(a) > SCAN_MAX || !opModeIsActive()) {
                 continue;
             }
-            turnTo(start + a, 1.0, true);
+            turnTo(start + a, 1.0, false);
             lookAtHive(String.format(Locale.US, "no tags: looking for the HIVE %.0f deg %s", Math.abs(a), a > 0 ? "left" : "right"));
             if (tagsInLook() > 0) {
                 note(String.format(Locale.US, "  found the HIVE %.0f deg %s of where it should be", Math.abs(a), a > 0 ? "left" : "right"));
@@ -1703,7 +1711,7 @@ public class Auto5 extends LinearOpMode {
             }
         }
         note("  no HIVE tags anywhere in the scan");
-        turnTo(start, 1.0, true);
+        turnTo(start, 1.0, false);
         return false;
     }
 

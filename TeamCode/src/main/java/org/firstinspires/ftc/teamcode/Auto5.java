@@ -79,12 +79,15 @@ import org.firstinspires.ftc.robotcore.internal.system.AppUtil;
  * off and odometry gets the Control Hub's full speed. The "Webcam" line shows STREAMING and the
  * pictures a second (expect about 20). No tags from the start spot: TAG_DECIMATION = 1. Picture
  * too dark: raise EXPOSURE_MS or GAIN (EXPOSURE_MS = 0: the webcam's own automatic exposure).
- * The camera answers two questions:
- *   before a volley   which CELL of our HIVE is UP? (the up CELL's tags are higher)
- *   after a volley    did the HIVE TIP? (the other CELL is up now)
- * No answer = it does what the plan says anyway (shoots, and assumes the volley tipped the HIVE).
+ * The camera answers two questions, by comparing what it sees NOW with what it saw before (see TIP_MOVE):
+ *   before a volley   is the CELL straight behind UP? (its tags where an up CELL's tags were)
+ *   after a volley    did the HIVE TIP? (that CELL's tags moved or are gone)
+ * What it then does (changed after run 1, where the HIVE did not tip but the robot drove off anyway):
+ *   did NOT tip           that CELL is still up: collect the GARDEN, back to this same spot, shoot it again
+ *   tipped                the other CELL is up: GARDEN, cross under the HIVE, shoot the other CELL
+ *   CELL behind is down   don't shoot it: cross to the other CELL (and back again at most once)
+ * No answer (no pictures) = it does what the plan says (shoots, and assumes the volley tipped the HIVE).
  * CAMERA_DECIDES = false: the camera only reports on the screen and never changes the plan.
- * "Which CELL is up" from the tag heights is a GUESS until test T3: watch the "Up" line in INIT.
  * The camera never changes the plan on ONE look: "that CELL is down" and "it did NOT tip" are
  * looked at twice, and both looks must agree.
  *
@@ -204,6 +207,16 @@ public class Auto5 extends LinearOpMode {
     // Only ONE CELL seen: its tags higher than ONE_CELL_SPLIT = it is up, lower = it is down.
     // 0 = off (needs both CELLs). Set it from test T3: halfway between the up and down heights.
     static final double ONE_CELL_SPLIT = 0;
+    // IS THE CELL BEHIND UP? (Changed after run 1, 2026-11-22: the HIVE did not tip, but only that one
+    // CELL was in view, so the check above couldn't tell, assumed a tip, and the robot drove off to shoot
+    // a CELL that was down.) Now it goes by what the camera really sees, compared with a reference:
+    //   - From a shooting spot, an UP CELL straight behind shows its tags at a certain height. That height
+    //     is learned on the first look at a CELL believed up (normally the near CELL at START).
+    //   - Right after a volley, the look just before it, from the same spot, is the reference.
+    // Its tags at the reference height (within TIP_MOVE) = UP. Much higher or lower, or gone while the
+    // camera does give pictures = DOWN. Too few pictures = can't tell, and the plan decides.
+    static final double TIP_MOVE = 2.0;        // inches: tags this much higher or lower = the CELL moved
+    static final int MIN_PICTURES = 3;         // fewer pictures than this in a look = the camera can't tell
     // ODOMETRY + CAMERA. The camera does not decide alone: a camera fix only moves the odometry part of
     // the way, a big jump is thrown out, and the aim checks the camera against the odometry.
     static final double FIX_WEIGHT = 0.6;      // how much of the camera's X fix is believed (0 = never, 1 = all)
@@ -252,6 +265,9 @@ public class Auto5 extends LinearOpMode {
     int upBelief;       // which CELL it thinks is up now
     String upFrom = ""; // why it thinks so, for the screen
     boolean crossedSinceShot;
+    boolean crossedBack;  // already crossed back once because the CELL on that side was down
+    double upHeight = Double.NaN;      // how high an UP CELL's tags look from a shooting spot (NaN = not seen yet)
+    double beforeHeight = Double.NaN;  // how high the shot CELL's tags looked just before the last volley
     int tips;           // volleys the tip check said (or assumed) tipped the HIVE
     String doing = "";
     final List<String> stepsDone = new ArrayList<>();
@@ -351,7 +367,7 @@ public class Auto5 extends LinearOpMode {
 
         // ------------------------------------------------------------ THE PLAN: decide, do, repeat
         while (opModeIsActive()) {
-            Act next = decide(spot, held, gardenUsed, upBelief, timeLeft(), match.seconds() < 1, crossedSinceShot);
+            Act next = decide(spot, held, gardenUsed, upBelief, timeLeft(), match.seconds() < 1, crossedSinceShot, !crossedBack);
             if (next == Act.FINISH) {
                 break;
             }
@@ -364,6 +380,10 @@ public class Auto5 extends LinearOpMode {
                     shootHere();
                     break;
                 case CROSS:
+                    if (crossedSinceShot) {
+                        crossedBack = true;  // the CELL on this side was down: back to the other one, once
+                        note("the CELL here is down: crossing back to shoot the other one");
+                    }
                     cross();
                     crossedSinceShot = true;
                     break;
@@ -388,11 +408,15 @@ public class Auto5 extends LinearOpMode {
      * tips the HIVE), and during AUTO with what the camera really saw.
      *   On the side-wall spot: go to the spot right behind the CELL that is up.
      *   Holding POLLEN: the CELL right behind us is up -> shoot. It is down -> cross to the other spot
-     *       (but not straight back again if we just crossed: then it gives up and parks).
-     *   Empty: collect the GARDEN once (it ends on the near-wall spot). Used already: finish.
+     *       (straight back again only once, mayCrossBack: one of our two CELLs is always up, so
+     *       after that it shoots wherever it is).
+     *   Empty: collect the GARDEN once (it ends on the near-wall spot, the start spot). Used already: finish.
+     *       So when a volley did NOT tip the HIVE, the CELL behind is still up: GARDEN, back to the
+     *       start spot, and shoot the same CELL again.
      * Every step must fit in the time left (the clock rule), or it finishes now.
      */
-    static Act decide(int spot, int held, boolean gardenUsed, int up, double timeLeft, boolean firstShot, boolean crossedSinceShot) {
+    static Act decide(int spot, int held, boolean gardenUsed, int up, double timeLeft, boolean firstShot,
+                      boolean crossedSinceShot, boolean mayCrossBack) {
         if (up == UP_UNKNOWN) {
             up = UP_NEAR;  // the normal setup
         }
@@ -404,7 +428,7 @@ public class Auto5 extends LinearOpMode {
             if (up == behind) {
                 return fits(timeLeft, firstShot ? T_FIRST_SHOT : T_SHOT) ? Act.SHOOT : Act.FINISH;
             }
-            if (crossedSinceShot) {
+            if (crossedSinceShot && !mayCrossBack) {
                 return Act.FINISH;
             }
             return fits(timeLeft, T_CROSS + T_SHOT) ? Act.CROSS : Act.FINISH;
@@ -457,7 +481,7 @@ public class Auto5 extends LinearOpMode {
         double t = 0;
         if (up == UP_UNKNOWN) up = UP_NEAR;
         for (int i = 0; i < 12; i++) {
-            Act a = decide(spot, held, garden, up, AUTO_SECONDS - t, t < 1, crossed);
+            Act a = decide(spot, held, garden, up, AUTO_SECONDS - t, t < 1, crossed, false);
             PlanStep s;
             if (a == Act.FINISH) break;
             if (a == Act.TO_NEAR_SPOT || a == Act.TO_FAR_SPOT) {
@@ -579,6 +603,8 @@ public class Auto5 extends LinearOpMode {
     /**
      * At the near-wall or far-wall spot: look first. The CELL straight behind is up (or the camera
      * can't tell): aim, shoot 4, tip check. It is down: don't shoot (the brain then crosses).
+     * Just crossed back because the other CELL was down: shoot here whatever the camera says, since
+     * one of our two CELLs is always up.
      */
     void shootHere() {
         int behind = spot == NEAR ? UP_NEAR : UP_FAR;
@@ -588,16 +614,21 @@ public class Auto5 extends LinearOpMode {
         ElapsedTime timer = new ElapsedTime();
         if (portal != null) {
             lookAtHive("is the " + cell + " CELL up?");
-            int seen = whichIsUp();
+            int seen = behindState(behind, upHeight);
             note("before shot " + (tips + 1) + ": " + upNote);
             if (seen != UP_UNKNOWN && seen != behind && CAMERA_DECIDES) {
-                // The camera says: don't shoot here. That changes the plan, so look once more first.
-                lookAtHive("look again: is the " + cell + " CELL really down?");
-                int again = whichIsUp();
-                note("  second look: " + upNote);
-                if (again != seen) {
-                    note("  -> the two looks don't agree: follow the plan, shoot");
+                if (crossedBack && crossedSinceShot) {
+                    note("  -> it says down here too, but one of our CELLs must be up: shooting anyway");
                     seen = UP_UNKNOWN;
+                } else {
+                    // The camera says: don't shoot here. That changes the plan, so look once more first.
+                    lookAtHive("look again: is the " + cell + " CELL really down?");
+                    int again = behindState(behind, upHeight);
+                    note("  second look: " + upNote);
+                    if (again != seen) {
+                        note("  -> the two looks don't agree: follow the plan, shoot");
+                        seen = UP_UNKNOWN;
+                    }
                 }
             }
             if (seen != UP_UNKNOWN && CAMERA_DECIDES) {
@@ -623,6 +654,14 @@ public class Auto5 extends LinearOpMode {
         }
         if (portal != null) {
             aimAt(behind);
+            // What the CELL looks like right now, just before the volley: the tip check compares with it.
+            // The first time a CELL we shoot at is seen, its height is also what "UP" looks like.
+            CellLook now = cellLook(behind == UP_NEAR ? nearCellIndex() : farCellIndex());
+            beforeHeight = now.tags > 0 ? now.up : Double.NaN;
+            if (Double.isNaN(upHeight) && now.tags > 0) {
+                upHeight = now.up;
+                note(String.format(Locale.US, "  an UP CELL's tags look %.1f in. high from a shooting spot: that is the reference now", upHeight));
+            }
         }
         while (opModeIsActive() && timer.seconds() < 2 && rpmNow < RPM - 75) {
             updateOdometry();
@@ -639,7 +678,12 @@ public class Auto5 extends LinearOpMode {
         tipCheck(behind);
     }
 
-    /** About a second after a volley: did the HIVE tip? No answer = assume it did (the plan). */
+    /**
+     * About a second after a volley: did the HIVE tip? The robot hasn't moved, so the look just before
+     * the volley is the reference: the same CELL's tags still at the same height = NOT tipped (then the
+     * brain collects the GARDEN, comes back to this spot and shoots the same CELL again). Its tags
+     * moved or gone = TIPPED. No answer at all (no pictures) = assume it did (the plan).
+     */
     void tipCheck(int shotAt) {
         int other = shotAt == UP_NEAR ? UP_FAR : UP_NEAR;
         ElapsedTime timer = new ElapsedTime();
@@ -647,15 +691,16 @@ public class Auto5 extends LinearOpMode {
             updateOdometry();
             show("waiting for the HIVE to settle");
         }
+        double reference = Double.isNaN(beforeHeight) ? upHeight : beforeHeight;
         int seen = UP_UNKNOWN;
         if (portal != null) {
             lookAtHive("did it tip?");
-            seen = whichIsUp();
+            seen = behindState(shotAt, reference);
             if (seen == shotAt && CAMERA_DECIDES) {
-                // "NOT tipped" changes the plan (it shoots again or crosses): look once more first.
+                // "NOT tipped" changes the plan (it shoots this CELL again): look once more first.
                 note("tip check, first look: " + upNote);
                 lookAtHive("look again: really not tipped?");
-                if (whichIsUp() != shotAt) {
+                if (behindState(shotAt, reference) != shotAt) {
                     note("  the two looks don't agree: follow the plan");
                     seen = UP_UNKNOWN;
                 }
@@ -1229,6 +1274,34 @@ public class Auto5 extends LinearOpMode {
             c.right -= rightSlope / spread * place;
         }
         return c;
+    }
+
+    /**
+     * Is the CELL straight behind (which: UP_NEAR or UP_FAR) up, from the last look? Answers which CELL
+     * is up (UP_NEAR / UP_FAR) or UP_UNKNOWN, and sets upNote. reference = how high its tags were when
+     * it was up (see TIP_MOVE); NaN = not known yet, then only both CELLs in view can tell (whichIsUp).
+     */
+    int behindState(int which, double reference) {
+        int other = which == UP_NEAR ? UP_FAR : UP_NEAR;
+        String name = which == UP_NEAR ? "near" : "far";
+        if (pictures < MIN_PICTURES) {
+            upNote = "only " + pictures + " pictures from the webcam -> " + UP_NAMES[UP_UNKNOWN];
+            return UP_UNKNOWN;
+        }
+        if (Double.isNaN(reference)) {
+            return whichIsUp();  // nothing to compare with yet
+        }
+        CellLook c = cellLook(which == UP_NEAR ? nearCellIndex() : farCellIndex());
+        if (c.tags == 0) {
+            upNote = String.format(Locale.US, "%s CELL: its tags are GONE (%d pictures; up it showed them at %.1f in.) -> %s",
+                    name, pictures, reference, UP_NAMES[other]);
+            return other;
+        }
+        double moved = c.up - reference;
+        int answer = Math.abs(moved) <= TIP_MOVE ? which : other;
+        upNote = String.format(Locale.US, "%s CELL: %d tags at %.1f in. high, %+.1f from %.1f when up -> %s",
+                name, c.tags, c.up, moved, reference, UP_NAMES[answer]);
+        return answer;
     }
 
     /** Which CELL of our HIVE is up, from the last look. Sets upNote for the screen. */

@@ -260,7 +260,10 @@ public class Auto5 extends LinearOpMode {
     // own way round the HIVE legs (and anything it hit before), and watches itself while it drives.
     // The HIVE legs on our side of the midline, {X, Y}: the corners of the 49.46 x 38.95 in. HIVE
     // frame (Auto4's numbers). A GUESS: measure your HIVE and put its real legs here.
-    static final double[][] LEGS = {{47.27, 52.53}, {47.27, 91.47}};
+    // Run 6 (Jin: "the bot is always hitting the center structure"): the robot no longer drives UNDER
+    // the HIVE at all. The whole HIVE frame, {X1, Y1, X2, Y2}, is one block it goes round.
+    static final double[] HIVE_BOX = {47.27, 52.53, 96.73, 91.47};
+    static final double[][] LEGS = {};  // single legs to keep clear of (none now: HIVE_BOX covers them)
     static final double LEG_RADIUS = 1.0;   // inches
     static final double CLEARANCE = 3.0;    // inches kept between the robot's side and a leg
     // Where the camera really sees our CELLs moves the legs with them (up to HIVE_SHIFT_MAX in. along
@@ -273,7 +276,7 @@ public class Auto5 extends LinearOpMode {
     // A HIT while driving a planned move: a wheel with power stops turning while the others turn, the
     // robot twists more than HIT_TWIST degrees, or it stops getting further. Then it backs off BACK_OFF
     // in., marks that spot as blocked, and plans again round it (at most MAX_REPLANS times).
-    static final double HIT_TWIST = 5, BACK_OFF = 4;
+    static final double HIT_TWIST = 10, BACK_OFF = 4;  // run 6: 5 deg also fired on hard sideways starts
     static final int MAX_REPLANS = 2;
     static final double TURN_ROOM = 13;     // inches from the robot's middle to anything for a turn on the spot (half diagonal 12)
     static final double LEAVE_WALL = 4;     // inches it backs straight off a wall before it plans a move
@@ -706,6 +709,11 @@ public class Auto5 extends LinearOpMode {
         if (x < TURN_ROOM || y < TURN_ROOM || 144 - y < TURN_ROOM || 72 - x < TURN_ROOM || insideAny(x, y, obstacles())) {
             return false;
         }
+        double r = TURN_ROOM + 1;  // the HIVE frame, stretched to where the camera saw it
+        if (x > HIVE_BOX[0] - r && x < HIVE_BOX[2] + r && y > HIVE_BOX[1] + Math.min(0, hiveShiftY) - r
+                && y < HIVE_BOX[3] + Math.max(0, hiveShiftY) + r) {
+            return false;
+        }
         for (double[] leg : LEGS) {
             double legY = Range.clip(y, leg[1] + Math.min(0, hiveShiftY), leg[1] + Math.max(0, hiveShiftY));
             if (Math.hypot(x - leg[0], y - legY) < TURN_ROOM + LEG_RADIUS) {
@@ -728,6 +736,9 @@ public class Auto5 extends LinearOpMode {
     List<double[]> obstacles() {
         List<double[]> boxes = new ArrayList<>();
         double h = ROBOT_SIDE + LEG_RADIUS + CLEARANCE;
+        double hb = ROBOT_SIDE + CLEARANCE;
+        boxes.add(new double[] {HIVE_BOX[0] - hb, HIVE_BOX[1] + Math.min(0, hiveShiftY) - hb,
+                HIVE_BOX[2] + hb, HIVE_BOX[3] + Math.max(0, hiveShiftY) + hb});
         for (double[] leg : LEGS) {
             boxes.add(new double[] {leg[0] - h, leg[1] + Math.min(0, hiveShiftY) - h,
                     leg[0] + h, leg[1] + Math.max(0, hiveShiftY) + h});
@@ -794,7 +805,25 @@ public class Auto5 extends LinearOpMode {
         for (int v = 1; v != 0; v = prev[v]) {
             way.add(0, nodes.get(v));
         }
-        return way;
+        // Straight lines only (Jin, run 6): a slanted line becomes across-then-along (or along-then-
+        // across) the field, whichever stays free; if neither does, it keeps the slanted line.
+        List<double[]> straight = new ArrayList<>();
+        double[] from = nodes.get(0);
+        for (double[] p : way) {
+            if (Math.abs(p[0] - from[0]) > 1 && Math.abs(p[1] - from[1]) > 1) {
+                for (double[] corner : new double[][] {{p[0], from[1]}, {from[0], p[1]}}) {
+                    boolean inField = corner[0] >= ROBOT_SIDE && corner[0] <= MAX_X && corner[1] >= ROBOT_HALF && corner[1] <= 144 - ROBOT_HALF;
+                    if (inField && lineFree(from, corner, boxes, nodes.get(0), nodes.get(1))
+                            && lineFree(corner, p, boxes, nodes.get(0), nodes.get(1))) {
+                        straight.add(corner);
+                        break;
+                    }
+                }
+            }
+            straight.add(p);
+            from = p;
+        }
+        return straight;
     }
 
     static boolean insideAny(double x, double y, List<double[]> boxes) {

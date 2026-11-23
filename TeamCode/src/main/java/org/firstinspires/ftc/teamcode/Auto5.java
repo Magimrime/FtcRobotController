@@ -101,6 +101,14 @@ import org.firstinspires.ftc.robotcore.internal.system.AppUtil;
  *   - it turns around at X 56 and never drives past X 62, so even a turning robot stays off the midline
  * Measure STRAFE_FACTOR first (see the knob): the simulator showed sideways slip is the biggest error.
  *
+ * EVERY MOVE IS PLANNED FROM WHERE THE ROBOT REALLY IS (added after run 3, where it hit a HIVE leg):
+ *   - it backs straight off the wall first, turns back to its heading if it got twisted, then plans the
+ *     shortest way to the goal round the HIVE legs (LEGS), moved to where the camera saw our HIVE
+ *   - next to a leg it drives at NEAR_POWER at most; sideways never slower than MIN_STRAFE_POWER
+ *   - a HIT (a wheel stops, the robot twists, or it stops getting further): it backs off, marks the
+ *     spot as blocked, and plans round it; turns on the spot only where there is room (TURN_ROOM)
+ *   - only the last bit into a wall or the GARDEN corner is a straight push, as before
+ *
  * RUN LOG: every run writes /sdcard/FIRST/data/auto5-log-N.csv on the Control Hub (see LOG): the
  * odometry position, target and wheel / intake / siphon commands every loop, and every step, drive
  * and turn command, camera look and note. Plug the Control Hub into the laptop to fetch it.
@@ -108,8 +116,9 @@ import org.firstinspires.ftc.robotcore.internal.system.AppUtil;
  * THE CLOCK RULE: before each step it checks that the step still fits in the 30 s (from the
  * T_ estimates below). If not, it skips to the end: park, or LEAVE.
  *
- * BLOCKS: drivePath(spots, endsAtWall)  turnTo(heading)  shootHere()  tipCheck()  collectGarden()
- *         cross()  finish()   The brain that picks the next block is decide().
+ * BLOCKS: goTo(x, y)  turnAt(x, y, heading)  pressWall(wall)  leaveWall(inches)  shootHere()  tipCheck()
+ *         collectGarden()  cross()  finish()   The brain that picks the next block is decide().
+ * The route arrays (TO_GARDEN, NEAR_TO_FAR ...) now only give the goals and draw the INIT map.
  */
 @Autonomous(name = "Auto5 Webcam", group = "Robot", preselectTeleOp = "TeleOp")
 public class Auto5 extends LinearOpMode {
@@ -204,9 +213,10 @@ public class Auto5 extends LinearOpMode {
     // higher by more than UP_MARGIN. GUESSES until test T3 (tip the HIVE by hand, read the "Up" line).
     static final double UP_MARGIN = 2.0;       // inches
     static final int UP_MIN_TAGS = 2;          // tags of a CELL needed before its height counts
-    // Only ONE CELL seen: its tags higher than ONE_CELL_SPLIT = it is up, lower = it is down.
-    // 0 = off (needs both CELLs). Set it from test T3: halfway between the up and down heights.
-    static final double ONE_CELL_SPLIT = 0;
+    // A CELL's tags higher than ONE_CELL_SPLIT = it is up, lower = it is down (each CELL in view says
+    // it on its own, even with 1 tag). From runs 1 and 3 on the practice HIVE: the up CELLs' tags were
+    // 28-31 in. high, the down CELLs' tags 8-9 in. (ours and blue's), so halfway = 19. 0 = off.
+    static final double ONE_CELL_SPLIT = 19;
     // IS THE CELL BEHIND UP? (Changed after run 1, 2026-11-22: the HIVE did not tip, but only that one
     // CELL was in view, so the check above couldn't tell, assumed a tip, and the robot drove off to shoot
     // a CELL that was down.) Now it goes by what the camera really sees, compared with a reference:
@@ -234,7 +244,7 @@ public class Auto5 extends LinearOpMode {
     static final double DRIVE_POWER = 1.0;
     static final double LINE_GAIN = 0.1, MAX_LINE_FIX = 0.5;
     static final double TWIST_GAIN = 0.02, MAX_TWIST_FIX = 0.3;
-    static final double SLOW_ZONE = 24, MIN_POWER = 0.1;
+    static final double SLOW_ZONE = 24, MIN_POWER = 0.2;
     static final double SETTLE_TIME = 0.75;
     static final double WALL_SETTLE = 0.2;  // seconds on a wall before odometry is told where the wall is
     static final double TURN_CLOSE = 5, TURN_SETTLE = 1.0;
@@ -243,6 +253,31 @@ public class Auto5 extends LinearOpMode {
     // Mecanum wheels slip sideways: the encoders count more than the robot really strafes. Test: strafe
     // 48 in. by the screen, measure with a tape, STRAFE_FACTOR = measured / 48. (Guess until measured.)
     static final double STRAFE_FACTOR = 0.9;
+
+    // ================================================================ PLANNING EACH MOVE (added after run 3)
+    // Run 3: the robot hit a HIVE leg, and crawled sideways along the near wall at 30% power with two
+    // wheels stopped. So every move now starts from where odometry says the robot REALLY is, plans its
+    // own way round the HIVE legs (and anything it hit before), and watches itself while it drives.
+    // The HIVE legs on our side of the midline, {X, Y}: the corners of the 49.46 x 38.95 in. HIVE
+    // frame (Auto4's numbers). A GUESS: measure your HIVE and put its real legs here.
+    static final double[][] LEGS = {{47.27, 52.53}, {47.27, 91.47}};
+    static final double LEG_RADIUS = 1.0;   // inches
+    static final double CLEARANCE = 3.0;    // inches kept between the robot's side and a leg
+    // Where the camera really sees our CELLs moves the legs with them (up to HIVE_SHIFT_MAX in. along
+    // the field). Run 3: the camera saw our CELL about 6 in. further from the near wall than assumed,
+    // and the robot hit the far leg turning off too early. The legs then block the whole stretch from
+    // where the code assumes them to where the camera saw them, so the robot keeps clear of both.
+    static final double HIVE_SHIFT_MAX = 10;
+    static final double NEAR_POWER = 0.5, SLOW_NEAR = 8;  // at most this power next to a leg; full power from SLOW_NEAR in. away
+    static final double MIN_STRAFE_POWER = 0.45;  // a sideways move slower than this stalls (run 3: two wheels stopped at 0.3)
+    // A HIT while driving a planned move: a wheel with power stops turning while the others turn, the
+    // robot twists more than HIT_TWIST degrees, or it stops getting further. Then it backs off BACK_OFF
+    // in., marks that spot as blocked, and plans again round it (at most MAX_REPLANS times).
+    static final double HIT_TWIST = 5, BACK_OFF = 4;
+    static final int MAX_REPLANS = 2;
+    static final double TURN_ROOM = 13;     // inches from the robot's middle to anything for a turn on the spot (half diagonal 12)
+    static final double LEAVE_WALL = 4;     // inches it backs straight off a wall before it plans a move
+    static final double HEADING_OFF = 4;    // degrees: further off its heading than this, it turns back before driving
     static final RevHubOrientationOnRobot.LogoFacingDirection HUB_LOGO = RevHubOrientationOnRobot.LogoFacingDirection.UP;
     static final RevHubOrientationOnRobot.UsbFacingDirection HUB_USB = RevHubOrientationOnRobot.UsbFacingDirection.FORWARD;
     static final double HUB_EDGE = 70, IMU_STUCK = 100;
@@ -266,6 +301,14 @@ public class Auto5 extends LinearOpMode {
     String upFrom = ""; // why it thinks so, for the screen
     boolean crossedSinceShot;
     boolean crossedBack;  // already crossed back once because the CELL on that side was down
+    double hiveShiftY;    // where the camera saw our CELLs minus where the code assumes them, along the field (inches)
+    final List<double[]> bumps = new ArrayList<>();  // spots {X, Y} where the robot hit something
+    boolean watchHits;    // driveLine: watch for a hit (planned moves only, not a push into a wall)
+    boolean hit;          // the last planned line ended in a hit
+    double hitX, hitY, hitDirX, hitDirY;  // where the robot was and which way it moved when it hit
+    String hitNote = "";  // what gave the hit away
+    int savedPictures;    // camera pictures saved for checking (looks that found no tags)
+    int logNumber;        // N of this run's auto5-log-N.csv
     double upHeight = Double.NaN;      // how high an UP CELL's tags look from a shooting spot (NaN = not seen yet)
     double beforeHeight = Double.NaN;  // how high the shot CELL's tags looked just before the last volley
     int tips;           // volleys the tip check said (or assumed) tipped the HIVE
@@ -531,34 +574,264 @@ public class Auto5 extends LinearOpMode {
     /** Side-wall spot to the near-wall or far-wall spot: off the wall, turn, round the HIVE frame, into the wall. */
     void fromSide(int to) {
         step(to == FAR ? "to the far-wall spot" : "to the near-wall spot");
-        drivePath(SIDE_OFF, false);
-        turnTo(to == FAR ? 90 : 270);
-        drivePath(to == FAR ? SIDE_TO_FAR : SIDE_TO_NEAR, false);
+        leaveWall(LEAVE_WALL);
+        turnAt(SIDE_OFF[0][0], SIDE_OFF[0][1], to == FAR ? 90 : 270);
         pressWall(to);
         spot = to;
     }
 
-    /** Under the HIVE to the other spot (Auto3's GREEN path, either way), turn around, into the wall. */
+    /** Under the HIVE to the other spot, planned round the legs, turn around where there is room, into the wall. */
     void cross() {
         step("cross under the HIVE");
+        leaveWall(LEAVE_WALL);
         if (spot == NEAR) {
-            drivePath(NEAR_TO_FAR, false);
-            turnTo(90);
+            turnAt(TURN_X, NEAR_TO_FAR[1][1], 90);
             pressWall(FAR);
             spot = FAR;
         } else {
-            drivePath(FAR_TO_NEAR, false);
-            turnTo(270);
+            turnAt(TURN_X, FAR_TO_NEAR[2][1], 270);
             pressWall(NEAR);
             spot = NEAR;
         }
     }
 
-    /** Front into the near or far wall; pressed on it, the robot's Y is sure again. */
+    /**
+     * Front into the near or far wall straight behind the CELL: a planned move to just in front of
+     * that wall, then straight into it. Pressed on it, the robot's Y is sure again.
+     */
     void pressWall(int which) {
-        drivePath(which == FAR ? FAR_PUSH : NEAR_PUSH, true);
+        double[] stage = which == FAR ? FAR_PUSH[0] : NEAR_PUSH[0];
+        double into = (which == FAR ? FAR_PUSH : NEAR_PUSH)[1][1];
+        goTo(stage[0], stage[1]);
+        planX = posX;
+        planY = posY;
+        drivePath(new double[][] {{posX, into}}, true);  // straight in from where it really is
         settleOnWall();
         posY = planY = which == FAR ? 144 - ROBOT_HALF : ROBOT_HALF;
+    }
+
+    /** Backs straight off the wall its front is on (or just backs up), before a planned move. */
+    void leaveWall(double inches) {
+        double h = Math.toRadians(heading);
+        planX = posX;
+        planY = posY;
+        driveLine(posX - inches * Math.cos(h), posY - inches * Math.sin(h), true, 1);
+        setWheels(0, 0, 0);
+    }
+
+    // ================================================================ PLANNING EACH MOVE
+
+    /**
+     * Drives to (gx, gy) FROM WHERE THE ROBOT REALLY IS: turns back to its heading first if it got
+     * twisted, plans a way round the HIVE legs (and spots it hit before), drives it slower next to
+     * them, and if it hits something anyway, backs off, marks the spot and plans again. True if it
+     * got there.
+     */
+    boolean goTo(double gx, double gy) {
+        gx = Math.min(gx, MAX_X);
+        for (int attempt = 0; attempt <= MAX_REPLANS && opModeIsActive(); attempt++) {
+            if (Math.abs(wrapDegrees(heading - planHeading)) > HEADING_OFF) {
+                note(String.format(Locale.US, "  heading %.0f instead of %.0f: turning back first", wrapDegrees(heading),
+                        wrapDegrees(planHeading)));
+                turnTo(planHeading, 1.5, false);
+            }
+            planX = posX;
+            planY = posY;
+            List<double[]> way = plan(posX, posY, gx, gy);
+            if (way == null) {  // the goal is too close to a leg (or walled in): don't drive into it
+                note(String.format(Locale.US, "  no free way from X %.0f Y %.0f to X %.0f Y %.0f: staying here", posX, posY, gx, gy));
+                return false;
+            }
+            StringBuilder words = new StringBuilder();
+            for (double[] p : way) {
+                words.append(String.format(Locale.US, " -> X %.1f Y %.1f", p[0], p[1]));
+            }
+            logRow("cmd", String.format(Locale.US, "planned from X %.1f Y %.1f%s", posX, posY, words));
+            watchHits = true;
+            hit = false;
+            drivePath(way.toArray(new double[0][]), false);
+            watchHits = false;
+            if (!hit) {
+                return true;
+            }
+            // Hit something: back off the way it came, mark the spot just past its edge, plan round it.
+            double bx = hitX + hitDirX * (ROBOT_HALF + 1), by = hitY + hitDirY * (ROBOT_HALF + 1);
+            bumps.add(new double[] {bx, by});
+            note(String.format(Locale.US, "  HIT at X %.0f Y %.0f (%s): backing off, planning round it", hitX, hitY, hitNote));
+            planX = posX;
+            planY = posY;
+            driveLine(posX - hitDirX * BACK_OFF, posY - hitDirY * BACK_OFF, true, 1);
+            setWheels(0, 0, 0);
+        }
+        return false;
+    }
+
+    /** Goes to a spot with room to turn on the spot (this one, or the nearest roomy one next to it), and turns. */
+    void turnAt(double x, double y, double newHeading) {
+        double[][] tries = {{0, 0}, {0, -6}, {0, 6}, {-6, 0}, {0, -12}, {0, 12}, {-12, 0}};
+        for (double[] d : tries) {
+            if (roomToTurn(x + d[0], y + d[1])) {
+                x += d[0];
+                y += d[1];
+                break;
+            }
+        }
+        goTo(x, y);
+        if (!roomToTurn(posX, posY)) {
+            note(String.format(Locale.US, "  little room to turn at X %.0f Y %.0f: turning anyway", posX, posY));
+        }
+        turnTo(newHeading);
+    }
+
+    /** Is there room to turn on the spot here: TURN_ROOM from every wall, the midline, every leg and bump? */
+    boolean roomToTurn(double x, double y) {
+        if (x < TURN_ROOM || y < TURN_ROOM || 144 - y < TURN_ROOM || 72 - x < TURN_ROOM || insideAny(x, y, obstacles())) {
+            return false;
+        }
+        for (double[] leg : LEGS) {
+            double legY = Range.clip(y, leg[1] + Math.min(0, hiveShiftY), leg[1] + Math.max(0, hiveShiftY));
+            if (Math.hypot(x - leg[0], y - legY) < TURN_ROOM + LEG_RADIUS) {
+                return false;
+            }
+        }
+        for (double[] b : bumps) {
+            if (Math.hypot(x - b[0], y - b[1]) < TURN_ROOM + 1) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Boxes {x1, y1, x2, y2} the robot's MIDDLE must stay out of. The robot always faces along the
+     * field, so its footprint is a square: a leg is a box of half its width plus the leg plus
+     * CLEARANCE round the leg, stretched from where the code assumes it to where the camera saw the HIVE.
+     */
+    List<double[]> obstacles() {
+        List<double[]> boxes = new ArrayList<>();
+        double h = ROBOT_SIDE + LEG_RADIUS + CLEARANCE;
+        for (double[] leg : LEGS) {
+            boxes.add(new double[] {leg[0] - h, leg[1] + Math.min(0, hiveShiftY) - h,
+                    leg[0] + h, leg[1] + Math.max(0, hiveShiftY) + h});
+        }
+        double b = ROBOT_HALF + 2;
+        for (double[] p : bumps) {
+            boxes.add(new double[] {p[0] - b, p[1] - b, p[0] + b, p[1] + b});
+        }
+        return boxes;
+    }
+
+    /**
+     * The shortest way from (sx, sy) to (gx, gy) that keeps the robot's middle out of every box and
+     * on our side of the field: straight if that is free, else via the boxes' corners. The spots to
+     * drive through (without the start), or null if there is none.
+     */
+    List<double[]> plan(double sx, double sy, double gx, double gy) {
+        List<double[]> boxes = obstacles();
+        List<double[]> nodes = new ArrayList<>();
+        nodes.add(new double[] {sx, sy});
+        nodes.add(new double[] {gx, gy});
+        for (double[] b : boxes) {
+            for (double cx : new double[] {b[0] - 0.5, b[2] + 0.5}) {
+                for (double cy : new double[] {b[1] - 0.5, b[3] + 0.5}) {
+                    if (cx >= ROBOT_SIDE && cx <= MAX_X && cy >= ROBOT_HALF && cy <= 144 - ROBOT_HALF && !insideAny(cx, cy, boxes)) {
+                        nodes.add(new double[] {cx, cy});
+                    }
+                }
+            }
+        }
+        int n = nodes.size();
+        double[] dist = new double[n];
+        int[] prev = new int[n];
+        boolean[] done = new boolean[n];
+        java.util.Arrays.fill(dist, Double.MAX_VALUE);
+        java.util.Arrays.fill(prev, -1);
+        dist[0] = 0;
+        for (int k = 0; k < n; k++) {  // Dijkstra over the free straight lines between the spots
+            int u = -1;
+            for (int i = 0; i < n; i++) {
+                if (!done[i] && dist[i] < Double.MAX_VALUE && (u < 0 || dist[i] < dist[u])) {
+                    u = i;
+                }
+            }
+            if (u < 0 || u == 1) {
+                break;
+            }
+            done[u] = true;
+            for (int v = 0; v < n; v++) {
+                if (done[v] || !lineFree(nodes.get(u), nodes.get(v), boxes, nodes.get(0), nodes.get(1))) {
+                    continue;
+                }
+                double d = dist[u] + Math.hypot(nodes.get(v)[0] - nodes.get(u)[0], nodes.get(v)[1] - nodes.get(u)[1]);
+                if (d < dist[v]) {
+                    dist[v] = d;
+                    prev[v] = u;
+                }
+            }
+        }
+        if (dist[1] == Double.MAX_VALUE) {
+            return null;
+        }
+        List<double[]> way = new ArrayList<>();
+        for (int v = 1; v != 0; v = prev[v]) {
+            way.add(0, nodes.get(v));
+        }
+        return way;
+    }
+
+    static boolean insideAny(double x, double y, List<double[]> boxes) {
+        for (double[] b : boxes) {
+            if (x > b[0] && x < b[2] && y > b[1] && y < b[3]) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** A straight line from a to b crosses no box. A box the robot is already in doesn't count (so it can get out). */
+    static boolean lineFree(double[] a, double[] b, List<double[]> boxes, double[] start, double[] goal) {
+        for (double[] box : boxes) {
+            boolean holdsStart = insideAny(start[0], start[1], java.util.Collections.singletonList(box));
+            if (!holdsStart && crossesBox(a[0], a[1], b[0], b[1], box)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Does the line from (ax, ay) to (bx, by) go through the inside of the box (Liang-Barsky)? Touching an edge doesn't count. */
+    static boolean crossesBox(double ax, double ay, double bx, double by, double[] box) {
+        double t0 = 0, t1 = 1, dx = bx - ax, dy = by - ay;
+        double[] p = {-dx, dx, -dy, dy};
+        double[] q = {ax - box[0], box[2] - ax, ay - box[1], box[3] - ay};
+        for (int i = 0; i < 4; i++) {
+            if (p[i] == 0) {
+                if (q[i] <= 0) {
+                    return false;  // runs beside the box, outside it (or along its edge)
+                }
+                continue;
+            }
+            double r = q[i] / p[i];
+            if (p[i] < 0) {
+                if (r > t1) return false;
+                t0 = Math.max(t0, r);
+            } else {
+                if (r < t0) return false;
+                t1 = Math.min(t1, r);
+            }
+        }
+        return t1 - t0 > 1e-6;
+    }
+
+    /** How far the robot's middle is from the nearest box (0 inside one): for slowing down next to a leg. */
+    double clearance() {
+        double best = Double.MAX_VALUE;
+        for (double[] b : obstacles()) {
+            double dx = Math.max(0, Math.max(b[0] - posX, posX - b[2]));
+            double dy = Math.max(0, Math.max(b[1] - posY, posY - b[3]));
+            best = Math.min(best, Math.hypot(dx, dy));
+        }
+        return best;
     }
 
     /**
@@ -576,13 +849,16 @@ public class Auto5 extends LinearOpMode {
     /** ONE motion into the GARDEN corner, the intake on for the last line, then home to the near-wall spot. */
     void collectGarden() {
         step(spot == NEAR ? "collect the GARDEN" : "cross back, collect the GARDEN");
+        leaveWall(LEAVE_WALL);
         if (spot == FAR) {
-            drivePath(FAR_TO_MIDDLE, false);  // under the HIVE, stopping just past it
-            turnTo(270);                      // intake toward the GARDEN
-            drivePath(TO_GARDEN_FROM_MIDDLE, true, TO_GARDEN_FROM_MIDDLE.length - 1);
-        } else {
-            drivePath(TO_GARDEN, true, TO_GARDEN.length - 1);
+            turnAt(TURN_X, FAR_TO_MIDDLE[1][1], 270);  // under the HIVE, past it; intake toward the GARDEN
         }
+        double[] front = TO_GARDEN[TO_GARDEN.length - 2], corner = TO_GARDEN[TO_GARDEN.length - 1];
+        goTo(front[0], front[1]);  // planned to in front of the GARDEN corner
+        setIntake(1);
+        planX = posX;
+        planY = posY;
+        drivePath(new double[][] {corner}, true);  // into the corner: the walls stop it
         ElapsedTime timer = new ElapsedTime();
         while (opModeIsActive() && timer.seconds() < 0.25) {  // pressed on the wall: let the balls in
             updateOdometry();
@@ -592,9 +868,8 @@ public class Auto5 extends LinearOpMode {
         posY = planY = ROBOT_HALF;  // front pressed on the near wall
         posX = planX = ROBOT_SIDE;  // right side pressed on our alliance wall
         note("GARDEN corner: odometry reset to the corner");
-        drivePath(HOME, true);
-        settleOnWall();
-        posY = planY = ROBOT_HALF;
+        leaveWall(LEAVE_WALL);
+        pressWall(NEAR);  // planned back to the start spot, then into the wall
         spot = NEAR;
         held = 4;
         gardenUsed = true;
@@ -647,7 +922,9 @@ public class Auto5 extends LinearOpMode {
         if (Math.abs(sideOff) > REALIGN_MIN && Math.abs(sideOff) < FIX_MAX) {
             note(String.format("  realign: %.1f in. %s of the CELL, sliding along the wall", Math.abs(sideOff),
                     sideOff > 0 ? "toward the midline" : "toward our wall"));
-            drivePath(new double[][] {{cellX, planY}}, false);
+            planX = posX;  // from where it really is
+            planY = posY;
+            drivePath(new double[][] {{cellX, posY}}, false);
             if (portal != null) {
                 lookAtHive("look again after sliding");
             }
@@ -725,15 +1002,16 @@ public class Auto5 extends LinearOpMode {
     void finish() {
         if (spot == SIDE) {
             step("LEAVE");
-            drivePath(new double[][] {{posX + LEAVE_GAP, posY}}, false);
+            leaveWall(LEAVE_GAP);
             return;
         }
         if (parkFits(spot, timeLeft())) {
             step("park in the LOADING ZONE");
-            drivePath(spot == FAR ? PARK_FROM_FAR : PARK_FROM_NEAR, false);
+            leaveWall(LEAVE_WALL);
+            goTo(PARK_SPOT[0], PARK_SPOT[1]);  // planned round the HIVE legs
         } else {
             step("LEAVE: off the wall");
-            drivePath(new double[][] {{planX, planY + (spot == FAR ? -LEAVE_GAP : LEAVE_GAP)}}, false);
+            leaveWall(LEAVE_GAP);
         }
     }
 
@@ -769,6 +1047,7 @@ public class Auto5 extends LinearOpMode {
             } while (file.exists());
             log = new BufferedWriter(new FileWriter(file));
             logName = file.getPath();
+            logNumber = n - 1;
             log.write("t,kind,step,x,y,heading,wheelHeading,targetX,targetY,offLine,cmdForward,cmdRight,cmdTurn,"
                     + "pFL,pFR,pBL,pBR,ticksFL,ticksFR,ticksBL,ticksBR,rpm,intake,siphon,tagFinder,loopMs,text\n");
         } catch (IOException e) {
@@ -902,8 +1181,11 @@ public class Auto5 extends LinearOpMode {
         ElapsedTime stuck = new ElapsedTime();
         ElapsedTime settled = new ElapsedTime();
         ElapsedTime close = new ElapsedTime();
+        ElapsedTime window = new ElapsedTime();  // for the hit check: wheel counts over the last 0.25 s
+        int[] windowTicks = lastTicks.clone();
         double furthest = -Double.MAX_VALUE;
         boolean blocked = false;
+        String why = "";
         while (opModeIsActive() && timer.seconds() < 2 + length / 8) {
             updateOdometry();
             double movedX = posX - fromX, movedY = posY - fromY;
@@ -912,6 +1194,30 @@ public class Auto5 extends LinearOpMode {
             double toGo = length - along;
             if (!easeIn && toGo < 1) {
                 break;  // at the corner: straight on to the next line
+            }
+            // A HIT (planned moves only): a wheel with power that stopped turning while the others
+            // turn, or a twist the robot didn't ask for.
+            if (watchHits && window.seconds() > 0.25) {
+                double sum = 0;
+                for (int i = 0; i < 4; i++) {
+                    sum += Math.abs(lastTicks[i] - windowTicks[i]);
+                }
+                String[] names = {"FL", "FR", "BL", "BR"};
+                for (int i = 0; i < 4 && why.isEmpty(); i++) {
+                    double mine = Math.abs(lastTicks[i] - windowTicks[i]);
+                    if (Math.abs(power[i]) > 0.3 && mine < 8 && (sum - mine) / 3 > 50) {
+                        why = "wheel " + names[i] + " stopped turning";
+                    }
+                }
+                windowTicks = lastTicks.clone();
+                window.reset();
+            }
+            if (watchHits && why.isEmpty() && timer.seconds() > 0.3 && Math.abs(wrapDegrees(heading - planHeading)) > HIT_TWIST) {
+                why = String.format(Locale.US, "twisted %.0f deg", wrapDegrees(heading - planHeading));
+            }
+            if (!why.isEmpty()) {
+                blocked = true;
+                break;
             }
             if (easeIn && Math.hypot(toGo, offLine) < 0.5) {
                 if (settled.seconds() > 0.1) {
@@ -932,16 +1238,25 @@ public class Auto5 extends LinearOpMode {
                 stuck.reset();
             } else if (stuck.seconds() > 0.6) {
                 blocked = true;
+                why = "stopped getting further";
                 break;
             }
+            // The slowest it may go: a sideways move needs more power than a straight one, or it stalls.
+            double hr = Math.toRadians(heading);
+            double sideways = Math.abs(ux * Math.sin(hr) - uy * Math.cos(hr));  // 0 = straight, 1 = sideways
+            double floor = MIN_POWER + (MIN_STRAFE_POWER - MIN_POWER) * sideways;
             double speed = DRIVE_POWER;
             if (easeIn) {
                 speed = Range.clip(toGo / SLOW_ZONE, -1, 1) * DRIVE_POWER;
-                if (Math.abs(toGo) > 0.5 && Math.abs(speed) < MIN_POWER) {
-                    speed = Math.copySign(MIN_POWER, toGo);
+                if (Math.abs(toGo) > 1.5 && Math.abs(speed) < floor) {  // the last 1.5 in. may go slower
+                    speed = Math.copySign(floor, toGo);
                 }
             } else if (arrivePower < 1) {
-                speed = Math.max(arrivePower, Math.min(1, toGo / SLOW_ZONE)) * DRIVE_POWER;
+                speed = Math.max(Math.max(arrivePower, floor), Math.min(1, toGo / SLOW_ZONE)) * DRIVE_POWER;
+            }
+            if (watchHits) {  // a planned move: slower next to a HIVE leg (or a spot it hit before)
+                double cap = NEAR_POWER + (1 - NEAR_POWER) * Math.min(1, clearance() / SLOW_NEAR);
+                speed = Math.copySign(Math.min(Math.abs(speed), Math.max(cap, floor)), speed);
             }
             // Field directions: along the line, plus a push back toward it (to its left when right of it).
             double fix = Range.clip(LINE_GAIN * offLine, -MAX_LINE_FIX, MAX_LINE_FIX);
@@ -957,8 +1272,16 @@ public class Auto5 extends LinearOpMode {
         }
         planX = blocked ? posX : toX;
         planY = blocked ? posY : toY;
+        if (blocked && watchHits) {
+            hit = true;
+            hitNote = why;
+            hitX = posX;
+            hitY = posY;
+            hitDirX = ux;
+            hitDirY = uy;
+        }
         logRow("cmd", String.format(Locale.US, "line %s after %.2f s: odometry X %.1f Y %.1f, off the line %.1f in.",
-                blocked ? "BLOCKED (stopped moving)" : timer.seconds() >= 2 + length / 8 ? "TIMED OUT" : "done",
+                blocked ? "BLOCKED (" + why + ")" : timer.seconds() >= 2 + length / 8 ? "TIMED OUT" : "done",
                 timer.seconds(), posX, posY, offLine));
         return !blocked;
     }
@@ -1070,6 +1393,14 @@ public class Auto5 extends LinearOpMode {
                 n.tags, n.behind, n.right, n.up, f.tags, f.behind, f.right, f.up));
         fixFromCamera();
         logRow("look", "after the look: " + fixNote);
+        // Keep the camera's picture when a look found no tag at all (and the very first look, to compare):
+        // /sdcard/VisionPortal-auto5-<run>-<seconds>s.png on the Control Hub.
+        if (savedPictures < 6 && (savedPictures == 0 || tagsInLook() == 0)) {
+            String name = String.format(Locale.US, "auto5-%d-%.0fs", logNumber, match.seconds());
+            portal.saveNextFrameRaw(name);
+            savedPictures++;
+            logRow("look", "saved the camera picture /sdcard/VisionPortal-" + name + ".png");
+        }
     }
 
     /** Switches the tag finder on (to look) or off (while driving: it takes a lot of the Control Hub's time). */
@@ -1088,7 +1419,7 @@ public class Auto5 extends LinearOpMode {
     void fixFromCamera() {
         fixHeadingFromCamera();
         double h = Math.toRadians(heading);
-        double sumX = 0;
+        double sumX = 0, sumShift = 0;
         int n = 0;
         for (int which = 0; which < 2; which++) {
             CellLook c = cellLook(which == 0 ? nearCellIndex() : farCellIndex());
@@ -1098,12 +1429,21 @@ public class Auto5 extends LinearOpMode {
             double[] cell = which == 0 ? NEAR_CELL_XY : FAR_CELL_XY;
             // behind = toward heading + 180, right = toward heading - 90
             sumX += cell[0] + c.behind * Math.cos(h) - c.right * Math.sin(h);
+            // ... and how much further along the field the CELL really is than the code assumes (the
+            // robot's Y is sure from the wall it is pressed on): the HIVE legs move with it.
+            sumShift += posY - c.behind * Math.sin(h) - c.right * Math.cos(h) - cell[1];
             n++;
         }
         if (n == 0) {
             fixNote = "camera fix: no CELL seen well, odometry kept";
             return;
         }
+        double shift = Range.clip(sumShift / n, -HIVE_SHIFT_MAX, HIVE_SHIFT_MAX);
+        if (Math.abs(shift - hiveShiftY) > 1) {
+            note(String.format(Locale.US, "  the camera sees our HIVE %.1f in. %s the near wall than assumed: the legs move with it",
+                    Math.abs(shift), shift > 0 ? "further from" : "closer to"));
+        }
+        hiveShiftY = shift;
         double camX = sumX / n;
         double jump = camX - posX;
         if (Math.abs(jump) > FIX_MAX) {
@@ -1292,9 +1632,17 @@ public class Auto5 extends LinearOpMode {
             return whichIsUp();  // nothing to compare with yet
         }
         CellLook c = cellLook(which == UP_NEAR ? nearCellIndex() : farCellIndex());
+        if (c.tags == 0 && tagsInLook() == 0) {
+            // Run 3: back at the start spot after the GARDEN it saw NO tag at all, not even ones it saw
+            // before, and took that as "our CELL went down". Nothing at all means the camera can't
+            // see the HIVE (blocked? knocked? robot not where it thinks?), not that the CELL moved.
+            upNote = String.format(Locale.US, "%s CELL: the camera sees NO tags at all (%d pictures): blocked or not looking at the HIVE -> %s",
+                    name, pictures, UP_NAMES[UP_UNKNOWN]);
+            return UP_UNKNOWN;
+        }
         if (c.tags == 0) {
-            upNote = String.format(Locale.US, "%s CELL: its tags are GONE (%d pictures; up it showed them at %.1f in.) -> %s",
-                    name, pictures, reference, UP_NAMES[other]);
+            upNote = String.format(Locale.US, "%s CELL: its tags are GONE while %d other tags are in view (up it showed them at %.1f in.) -> %s",
+                    name, tagsInLook(), reference, UP_NAMES[other]);
             return other;
         }
         double moved = c.up - reference;
@@ -1304,23 +1652,34 @@ public class Auto5 extends LinearOpMode {
         return answer;
     }
 
+    /** How many different HIVE tags (any CELL, either alliance) the last look saw. */
+    int tagsInLook() {
+        int n = 0;
+        for (double[] tag : tagSeen) {
+            if (tag[3] > 0) {
+                n++;
+            }
+        }
+        return n;
+    }
+
     /** Which CELL of our HIVE is up, from the last look. Sets upNote for the screen. */
     int whichIsUp() {
         CellLook n = cellLook(nearCellIndex()), f = cellLook(farCellIndex());
         String seen = String.format("near %d tags %s | far %d tags %s", n.tags, n.tags > 0 ? String.format("%.1f in. up", n.up) : "",
                 f.tags, f.tags > 0 ? String.format("%.1f in. up", f.up) : "");
         int answer = UP_UNKNOWN;
-        if (n.tags >= UP_MIN_TAGS && f.tags >= UP_MIN_TAGS) {
+        if (ONE_CELL_SPLIT > 0 && n.tags + f.tags > 0) {
+            // Each CELL seen (even 1 tag) says it on its own: tags above the split = that CELL is up,
+            // below = it is down. Both seen and they disagree = can't tell.
+            int nearSays = n.tags == 0 ? UP_UNKNOWN : n.up > ONE_CELL_SPLIT + UP_MARGIN / 2 ? UP_NEAR
+                    : n.up < ONE_CELL_SPLIT - UP_MARGIN / 2 ? UP_FAR : UP_UNKNOWN;
+            int farSays = f.tags == 0 ? UP_UNKNOWN : f.up > ONE_CELL_SPLIT + UP_MARGIN / 2 ? UP_FAR
+                    : f.up < ONE_CELL_SPLIT - UP_MARGIN / 2 ? UP_NEAR : UP_UNKNOWN;
+            answer = nearSays == UP_UNKNOWN ? farSays : farSays == UP_UNKNOWN || farSays == nearSays ? nearSays : UP_UNKNOWN;
+        } else if (n.tags >= UP_MIN_TAGS && f.tags >= UP_MIN_TAGS) {
             double diff = n.up - f.up;
             answer = diff > UP_MARGIN ? UP_NEAR : diff < -UP_MARGIN ? UP_FAR : UP_UNKNOWN;
-        } else if (ONE_CELL_SPLIT > 0 && (n.tags >= UP_MIN_TAGS || f.tags >= UP_MIN_TAGS)) {
-            boolean nearOnly = n.tags >= UP_MIN_TAGS;
-            double h = nearOnly ? n.up : f.up;
-            if (h > ONE_CELL_SPLIT + UP_MARGIN / 2) {
-                answer = nearOnly ? UP_NEAR : UP_FAR;
-            } else if (h < ONE_CELL_SPLIT - UP_MARGIN / 2) {
-                answer = nearOnly ? UP_FAR : UP_NEAR;
-            }
         }
         String why = pictures == 0 ? "NO PICTURES from the webcam (" + portal.getCameraState() + "): plugged in? configured?"
                 : n.tags + f.tags == 0 ? "no tags of our HIVE in view" : seen;

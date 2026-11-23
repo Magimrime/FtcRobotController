@@ -30,6 +30,13 @@ import org.firstinspires.ftc.vision.apriltag.AprilTagSingleDetection;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.util.Locale;
+
+import org.firstinspires.ftc.robotcore.internal.system.AppUtil;
 
 /*
  * Auto5 Webcam: Auto4 Camera with the LOGITECH C270 WEBCAM instead of the Limelight. Everything
@@ -90,6 +97,10 @@ import java.util.concurrent.TimeUnit;
  *   - the aim compares camera and odometry: they agree = camera, they don't = odometry
  *   - it turns around at X 56 and never drives past X 62, so even a turning robot stays off the midline
  * Measure STRAFE_FACTOR first (see the knob): the simulator showed sideways slip is the biggest error.
+ *
+ * RUN LOG: every run writes /sdcard/FIRST/data/auto5-log-N.csv on the Control Hub (see LOG): the
+ * odometry position, target and wheel / intake / siphon commands every loop, and every step, drive
+ * and turn command, camera look and note. Plug the Control Hub into the laptop to fetch it.
  *
  * THE CLOCK RULE: before each step it checks that the step still fits in the 30 s (from the
  * T_ estimates below). If not, it skips to the end: park, or LEAVE.
@@ -283,6 +294,18 @@ public class Auto5 extends LinearOpMode {
     int cameraUp = UP_UNKNOWN;  // the camera's answer from the last look
     final ElapsedTime watch = new ElapsedTime();
 
+    // RUN LOG, to find out afterwards what went wrong. From START: one line every loop with where
+    // odometry says the robot is, where it is driving to, and what the wheels, intake and siphon are
+    // told; plus a line for every step, drive / turn command, camera look and note. The file is
+    // /sdcard/FIRST/data/auto5-log-N.csv on the Control Hub, N counting up with every run; the "Log"
+    // line on the screen names it. Plug the Control Hub into the laptop to fetch it.
+    static final boolean LOG = true;
+    BufferedWriter log;
+    String logName = "starts at START";
+    double cmdForward, cmdRight, cmdTurn, intakeCmd, siphonCmd, rpmNow;
+    long lastLoopNanos;
+    final ElapsedTime logFlush = new ElapsedTime();
+
     @Override
     public void runOpMode() {
         telemetry.setDisplayFormat(Telemetry.DisplayFormat.MONOSPACE);  // so the field drawing lines up
@@ -297,6 +320,23 @@ public class Auto5 extends LinearOpMode {
 
         // ------------------------------------------------------------ START
         match.reset();
+        openLog();
+        logRow("init", String.format("%s; %s %s; up pick %s; camera says %s; camera check: %s; up: %s; webcam: %s %s",
+                blue ? "BLUE" : "RED", SPOT_NAMES[startSpot], tile(blue, startSpot),
+                upPick == PICK_NEAR ? "NEAR" : upPick == PICK_FAR ? "FAR" : "CAMERA", UP_NAMES[cameraUp],
+                portal == null ? cameraNote : initCheck, upNote, portal == null ? "none" : webcamLine(), cameraSetup));
+        try {
+            runPlan();
+        } finally {
+            closeLog();
+            if (portal != null) {
+                portal.close();
+            }
+        }
+    }
+
+    /** AUTO itself, from START. */
+    void runPlan() {
         startOdometry(spotPose(startSpot));
         flywheel.setVelocity(RPM * 28 / 60.0);  // stays on the whole time
         findTags(false);  // the tag finder only runs during a look: odometry gets the Control Hub while driving
@@ -338,9 +378,6 @@ public class Auto5 extends LinearOpMode {
         while (opModeIsActive()) {  // keeps the debug screen up until AUTO ends
             updateOdometry();
             show("done");
-        }
-        if (portal != null) {
-            portal.close();
         }
     }
 
@@ -587,7 +624,7 @@ public class Auto5 extends LinearOpMode {
         if (portal != null) {
             aimAt(behind);
         }
-        while (opModeIsActive() && timer.seconds() < 2 && rpm() < RPM - 75) {
+        while (opModeIsActive() && timer.seconds() < 2 && rpmNow < RPM - 75) {
             updateOdometry();
             show("flywheel speeding up");
         }
@@ -658,6 +695,7 @@ public class Auto5 extends LinearOpMode {
     void step(String what) {
         stepsDone.add(String.format("%4.1f s  %s", match.seconds(), what));
         doing = what;
+        logRow("step", what);
     }
 
     void note(String what) {
@@ -665,6 +703,115 @@ public class Auto5 extends LinearOpMode {
         if (lookNotes.size() > 6) {
             lookNotes.remove(0);
         }
+        logRow("note", what);
+    }
+
+    // ================================================================ RUN LOG (see LOG)
+
+    void openLog() {
+        if (!LOG) {
+            logName = "off (LOG = false)";
+            return;
+        }
+        try {
+            File dir = AppUtil.ROBOT_DATA_DIR;
+            dir.mkdirs();
+            File file;
+            int n = 1;
+            do {
+                file = new File(dir, "auto5-log-" + n + ".csv");
+                n++;
+            } while (file.exists());
+            log = new BufferedWriter(new FileWriter(file));
+            logName = file.getPath();
+            log.write("t,kind,step,x,y,heading,wheelHeading,targetX,targetY,offLine,cmdForward,cmdRight,cmdTurn,"
+                    + "pFL,pFR,pBL,pBR,ticksFL,ticksFR,ticksBL,ticksBR,rpm,intake,siphon,tagFinder,loopMs,text\n");
+        } catch (IOException e) {
+            log = null;
+            logName = "could not open the log: " + e.getMessage();
+        }
+    }
+
+    /**
+     * One line of the log. kind "pos" = the every-loop line (odometry, target, commands); any other
+     * kind (init, step, cmd, look, note) = an event, its words in the last column.
+     */
+    void logRow(String kind, String text) {
+        if (log == null) {
+            return;
+        }
+        boolean pos = kind.equals("pos");
+        long now = System.nanoTime();
+        double loopMs = 0;
+        if (pos) {
+            loopMs = lastLoopNanos == 0 ? 0 : (now - lastLoopNanos) / 1e6;
+            lastLoopNanos = now;
+        }
+        StringBuilder r = new StringBuilder(220);
+        add(r, "%.3f", match.seconds());
+        add(r, "%s", kind);
+        add(r, "%s", csv(doing));
+        add(r, "%.2f", posX);
+        add(r, "%.2f", posY);
+        add(r, "%.1f", heading);
+        if (pos) {
+            add(r, "%.1f", wheelHeading);
+            add(r, "%.1f", targetX);
+            add(r, "%.1f", targetY);
+            add(r, "%.2f", offLine);
+            add(r, "%.3f", cmdForward);
+            add(r, "%.3f", cmdRight);
+            add(r, "%.3f", cmdTurn);
+            for (int i = 0; i < 4; i++) {
+                add(r, "%.3f", power[i]);
+            }
+            for (int i = 0; i < 4; i++) {
+                add(r, "%d", lastTicks[i] - startTicks[i]);
+            }
+            add(r, "%.0f", rpmNow);
+            add(r, "%.2f", intakeCmd);
+            add(r, "%.2f", siphonCmd);
+            add(r, "%s", portal != null && portal.getProcessorEnabled(tagFinder) ? "on" : "off");
+            add(r, "%.1f", loopMs);
+        } else {
+            for (int i = 0; i < 20; i++) {
+                r.append(',');
+            }
+        }
+        add(r, "%s", csv(text));
+        try {
+            log.write(r.append('\n').toString());
+            if (!pos || logFlush.seconds() > 0.5) {  // on the Control Hub's storage at least twice a second
+                log.flush();
+                logFlush.reset();
+            }
+        } catch (IOException e) {
+            closeLog();
+            logName = "log stopped: " + e.getMessage();
+        }
+    }
+
+    static void add(StringBuilder r, String format, Object value) {
+        if (r.length() > 0) {
+            r.append(',');
+        }
+        r.append(String.format(Locale.US, format, value));
+    }
+
+    static String csv(String text) {
+        return text.replace(',', ';').replace('\n', ' ');
+    }
+
+    void closeLog() {
+        if (log == null) {
+            return;
+        }
+        try {
+            log.close();
+        } catch (IOException e) {
+            // nothing more to save
+        }
+        log = null;
     }
 
     // ================================================================ DRIVING (Auto3's, in "our side" numbers)
@@ -704,6 +851,8 @@ public class Auto5 extends LinearOpMode {
         double length = Math.hypot(toX - fromX, toY - fromY);
         double ux = (toX - fromX) / Math.max(length, 0.001);  // direction of the line
         double uy = (toY - fromY) / Math.max(length, 0.001);
+        logRow("cmd", String.format(Locale.US, "drive line from X %.1f Y %.1f to X %.1f Y %.1f (%.1f in.)%s%s",
+                fromX, fromY, toX, toY, length, easeIn ? " easing in" : "", arrivePower < 1 ? " arrive at power " + arrivePower : ""));
         ElapsedTime timer = new ElapsedTime();
         ElapsedTime stuck = new ElapsedTime();
         ElapsedTime settled = new ElapsedTime();
@@ -763,6 +912,9 @@ public class Auto5 extends LinearOpMode {
         }
         planX = blocked ? posX : toX;
         planY = blocked ? posY : toY;
+        logRow("cmd", String.format(Locale.US, "line %s after %.2f s: odometry X %.1f Y %.1f, off the line %.1f in.",
+                blocked ? "BLOCKED (stopped moving)" : timer.seconds() >= 2 + length / 8 ? "TIMED OUT" : "done",
+                timer.seconds(), posX, posY, offLine));
         return !blocked;
     }
 
@@ -772,6 +924,7 @@ public class Auto5 extends LinearOpMode {
 
     /** Turns on the spot (Auto3's). offTheWall = front on a wall: the side that goes back backs off it. */
     void turnTo(double newHeading, double timeLimit, boolean offTheWall) {
+        logRow("cmd", String.format(Locale.US, "turn from %.1f to %.1f deg%s", heading, newHeading, offTheWall ? " (backing off the wall)" : ""));
         planHeading = newHeading;
         turning = true;
         ElapsedTime timer = new ElapsedTime();
@@ -800,6 +953,8 @@ public class Auto5 extends LinearOpMode {
         }
         setWheels(0, 0, 0);
         turning = false;
+        logRow("cmd", String.format(Locale.US, "turn ended after %.2f s at %.1f deg (%.1f off)", timer.seconds(), heading,
+                wrapDegrees(heading - planHeading)));
         if (imu != null) {
             wheelHeading = heading;
         }
@@ -811,16 +966,20 @@ public class Auto5 extends LinearOpMode {
     }
 
     void spinSiphon(double turns) {
-        siphon.setPower(Math.signum(turns) * SIPHON_POWER);
+        siphonCmd = Math.signum(turns) * SIPHON_POWER;
+        logRow("cmd", String.format(Locale.US, "siphon %+.2f turns at %.0f RPM", turns, rpmNow));
+        siphon.setPower(siphonCmd);
         ElapsedTime timer = new ElapsedTime();
         while (opModeIsActive() && timer.seconds() < Math.abs(turns) * SECONDS_PER_TURN) {
             updateOdometry();
             show(String.format("shooting: siphon %s", turns > 0 ? "forward" : "backward"));
         }
+        siphonCmd = 0;
         siphon.setPower(0);
     }
 
     void setIntake(double p) {
+        intakeCmd = p;
         intake.setPower(p);
         leftFeeder.setPower(p);
         rightFeeder.setPower(p);
@@ -860,7 +1019,12 @@ public class Auto5 extends LinearOpMode {
             show(what);
         }
         findTags(false);
+        CellLook n = cellLook(nearCellIndex()), f = cellLook(farCellIndex());
+        logRow("look", String.format(Locale.US, "%s: %d pictures (%s); near CELL %d tags %.1f behind %.1f right %.1f up;"
+                        + " far CELL %d tags %.1f behind %.1f right %.1f up", what, pictures, portal.getCameraState(),
+                n.tags, n.behind, n.right, n.up, f.tags, f.behind, f.right, f.up));
         fixFromCamera();
+        logRow("look", "after the look: " + fixNote);
     }
 
     /** Switches the tag finder on (to look) or off (while driving: it takes a lot of the Control Hub's time). */
@@ -1239,6 +1403,8 @@ public class Auto5 extends LinearOpMode {
         posY += forward * Math.sin(h) - sideways * Math.cos(h);
         int[] cell = mapCell(fieldX(blue, posX), fieldY(blue, posY));
         been[cell[0]][cell[1]] = true;
+        rpmNow = rpm();  // read once per loop, for the screen and the log
+        logRow("pos", "");
     }
 
     static double wrapDegrees(double degrees) {
@@ -1250,6 +1416,9 @@ public class Auto5 extends LinearOpMode {
     // ================================================================ SETUP (as Auto3)
 
     void setWheels(double forward, double right, double turn) {
+        cmdForward = forward;
+        cmdRight = right;
+        cmdTurn = turn;
         double[] p = {forward + right + turn, forward - right - turn, forward - right + turn, forward + right - turn};
         double max = Math.max(1, Math.max(Math.max(Math.abs(p[0]), Math.abs(p[1])), Math.max(Math.abs(p[2]), Math.abs(p[3]))));
         for (int i = 0; i < 4; i++) {
@@ -1417,8 +1586,9 @@ public class Auto5 extends LinearOpMode {
             String status = dead[i] ? "NOT COUNTING" : Math.abs(evidence[i]) <= 30 ? "?" : encoderSign[i] < 0 ? "BACKWARD (fixed)" : "ok";
             telemetry.addData("Wheel " + names[i], "%7d ticks  power %+.2f  %s", lastTicks[i] - startTicks[i], power[i], status);
         }
-        telemetry.addData("Flywheel", "%.0f of %.0f RPM", rpm(), RPM);
+        telemetry.addData("Flywheel", "%.0f of %.0f RPM", rpmNow, RPM);
         telemetry.addData("Webcam", portal == null ? cameraNote : webcamLine());
+        telemetry.addData("Log", logName);
         telemetry.update();
     }
 

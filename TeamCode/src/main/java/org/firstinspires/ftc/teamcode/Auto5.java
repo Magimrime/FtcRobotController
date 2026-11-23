@@ -19,6 +19,7 @@ import org.firstinspires.ftc.robotcore.external.hardware.camera.WebcamName;
 import org.firstinspires.ftc.robotcore.external.hardware.camera.controls.ExposureControl;
 import org.firstinspires.ftc.robotcore.external.hardware.camera.controls.GainControl;
 import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
+import org.firstinspires.ftc.robotcore.external.navigation.CurrentUnit;
 import org.firstinspires.ftc.robotcore.external.navigation.DistanceUnit;
 import org.firstinspires.ftc.robotcore.external.navigation.YawPitchRollAngles;
 import org.firstinspires.ftc.vision.VisionPortal;
@@ -265,7 +266,7 @@ public class Auto5 extends LinearOpMode {
     static final double[] HIVE_BOX = {47.27, 52.53, 96.73, 91.47};
     static final double[][] LEGS = {};  // single legs to keep clear of (none now: HIVE_BOX covers them)
     static final double LEG_RADIUS = 1.0;   // inches
-    static final double CLEARANCE = 3.0;    // inches kept between the robot's side and a leg
+    static final double CLEARANCE = 5.0;    // inches kept between the robot's side and a leg (simulator: 3 left the path round the HIVE 2.5 in. from a leg; harsh odometry is ~3.5 in. off)
     // Where the camera really sees our CELLs moves the legs with them (up to HIVE_SHIFT_MAX in. along
     // the field). Run 3: the camera saw our CELL about 6 in. further from the near wall than assumed,
     // and the robot hit the far leg turning off too early. The legs then block the whole stretch from
@@ -278,6 +279,28 @@ public class Auto5 extends LinearOpMode {
     // in., marks that spot as blocked, and plans again round it (at most MAX_REPLANS times).
     static final double HIT_TWIST = 10, BACK_OFF = 4;  // run 6: 5 deg also fired on hard sideways starts
     static final int MAX_REPLANS = 2;
+    // FROM THE SIMULATOR (2026-11-22, sim/README.md):
+    //  - Pushing a HIVE leg, the wheels keep spinning, so the encoders keep counting: no wheel stops,
+    //    and the robot "gets further" by odometry while it stands still (8 s and 90 in. in one run).
+    //    So a planned move that goes much slower than its power should give is a HIT too.
+    //  - A hit next to a HIVE leg says where the robot is: touching that leg. Odometry is moved there
+    //    (only on the side that touched), then it backs off and plans round it as before.
+    //  - Run 6's straight lines arrive at their corners at full speed: the 51 in. slide home along the
+    //    near wall overshot X 60 by ~4 in. and crossed the midline. Sharp corners are now driven into
+    //    slowly, and any move toward the midline slows as it gets close to MAX_X.
+    static final double TOP_SPEED = 50;        // in/s at full power (run 1: 92 in. in 1.66 s)
+    static final double SLOW_PROGRESS = 0.4;   // less than this share of that speed for SLOW_TIME s = pushing something
+    static final double SLOW_TIME = 0.4;
+    static final double LEG_SNAP = 6;          // in.: a hit this close to touching a HIVE leg = it touched that leg
+    static final double SHARP_CORNER = 45;     // degrees: a planned corner that turns more than this is arrived at slowly
+    static final double CORNER_ARRIVE = 0.5;   // the power it arrives at a sharp corner with (the old HOME used 0.3)
+    static final double MIDLINE_SLOW = 16;     // in.: moving toward the midline, it slows from this far before MAX_X
+    // PUSHING SOMETHING shows best in the motors' current: a wheel spinning against a leg draws several
+    // times what it draws cruising at the same power (simulator: ~7 A vs ~1.4 A at full power). GUESS
+    // until measured: the run log's "line done" rows say the highest wheel current of each line.
+    static final double PUSH_AMPS = 4.0;       // mean wheel amps per unit of mean wheel power: more = pushing
+    static final double PUSH_TIME = 0.3;       // seconds it has to last (a hard start or a corner is shorter)
+    static final double CURRENT_EVERY = 0.1;   // seconds between current reads (each is its own hub command)
     static final double TURN_ROOM = 13;     // inches from the robot's middle to anything for a turn on the spot (half diagonal 12)
     static final double LEAVE_WALL = 4;     // inches it backs straight off a wall before it plans a move
     static final double ARRIVED = 2.5;      // inches: stopping this close to the end of a move counts as arrived, not as a hit
@@ -332,6 +355,12 @@ public class Auto5 extends LinearOpMode {
     int logNumber;        // N of this run's auto5-log-N.csv
     double upHeight = Double.NaN;      // how high an UP CELL's tags look from a shooting spot (NaN = not seen yet)
     double beforeHeight = Double.NaN;  // how high the shot CELL's tags looked just before the last volley
+    // Where the robot stood (odometry X, Y, heading) for the look a later check compares with, per spot
+    // (NEAR, FAR, SIDE). Jin, after the simulator: a check from the wrong place can miss the tags and
+    // take that for a tip; so it goes back there first, and looks again there before believing "gone".
+    final double[][] refPose = new double[3][];
+    double[] lastLookPose = null;      // where the robot stood for the last look
+    static final double REF_OK = 1.0, REF_TURN_OK = 2.0;  // in. / deg from refPose that count as "there"
     int tips;           // volleys the tip check said (or assumed) tipped the HIVE
     String doing = "";
     final List<String> stepsDone = new ArrayList<>();
@@ -675,7 +704,14 @@ public class Auto5 extends LinearOpMode {
             if (!hit || Math.hypot(gx - posX, gy - posY) < ARRIVED) {
                 return true;  // a "hit" right at the goal is just arriving
             }
-            // Hit something: back off the way it came, mark the spot just past its edge, plan round it.
+            // Hit something. Next to a HIVE leg: that tells where the robot is (see snapToLeg).
+            String snapped = snapToLeg();
+            if (!snapped.isEmpty()) {
+                note("  " + snapped);
+                hitX = posX;
+                hitY = posY;
+            }
+            // Back off the way it came, mark the spot just past its edge, plan round it.
             double bx = hitX + hitDirX * (ROBOT_HALF + 1), by = hitY + hitDirY * (ROBOT_HALF + 1);
             bumps.add(new double[] {bx, by});
             note(String.format(Locale.US, "  HIT at X %.0f Y %.0f (%s): backing off, planning round it", hitX, hitY, hitNote));
@@ -685,6 +721,59 @@ public class Auto5 extends LinearOpMode {
             setWheels(0, 0, 0);
         }
         return false;
+    }
+
+    /**
+     * After a hit: did the robot run into one of our HIVE legs (the corners of HIVE_BOX on our side,
+     * moved with the camera's hiveShiftY)? A leg that STOPS the robot is ahead of it, in the direction
+     * it was driving (hitDirX / hitDirY), and touches its front / back (driving along the field) or
+     * its side (driving across). That gives two things:
+     *   - along the drive: its face is exactly at the leg: ROBOT_HALF (or ROBOT_SIDE) + LEG_RADIUS from it
+     *   - across: the leg is within its width, so it can't be more than ROBOT_SIDE (or ROBOT_HALF) +
+     *     LEG_RADIUS to the side of it; odometry further out than that is pulled in to it
+     * Odometry often has gone on counting past the leg (the wheels spin before the hit is noticed),
+     * so "ahead" allows up to LEG_SNAP * 2 behind. Only while the robot faces along the field (its
+     * footprint is then the square the planner uses). Says what it did, or "".
+     */
+    String snapToLeg() {
+        if (Math.abs(wrapDegrees(heading - 90)) > 15 && Math.abs(wrapDegrees(heading - 270)) > 15) {
+            return "";
+        }
+        double[][] legs = {{HIVE_BOX[0], HIVE_BOX[1]}, {HIVE_BOX[0], HIVE_BOX[3]}};
+        boolean alongY = Math.abs(hitDirY) >= Math.abs(hitDirX);
+        double dir = Math.signum(alongY ? hitDirY : hitDirX);
+        double reachDrive = alongY ? ROBOT_HALF + LEG_RADIUS : ROBOT_SIDE + LEG_RADIUS;    // along the drive
+        double reachCross = alongY ? ROBOT_SIDE + LEG_RADIUS : ROBOT_HALF + LEG_RADIUS;    // across it
+        double best = Double.MAX_VALUE, newDrive = 0, newCross = 0, legDrive = 0, legCross = 0;
+        boolean found = false;
+        for (double[] leg : legs) {
+            for (double shift : new double[] {0, hiveShiftY}) {
+                double ld = alongY ? leg[1] + shift : leg[0], lc = alongY ? leg[0] : leg[1] + shift;
+                double pd = alongY ? posY : posX, pc = alongY ? posX : posY;
+                double faceAt = ld - dir * reachDrive;           // where its middle is when its face touches the leg
+                double past = (pd - faceAt) * dir;               // odometry past that spot (+) or short of it (-)
+                double side = Math.abs(pc - lc) - reachCross;    // > 0: odometry says the leg isn't within its width
+                if (past > -LEG_SNAP && past < 2 * LEG_SNAP && side < LEG_SNAP) {
+                    double cost = Math.abs(past) + Math.max(0, side);
+                    if (cost < best) {
+                        best = cost;
+                        found = true;
+                        newDrive = faceAt;
+                        newCross = side > -0.5 ? lc + Math.copySign(reachCross - 0.5, pc - lc) : pc;
+                        legDrive = ld;
+                        legCross = lc;
+                    }
+                }
+            }
+        }
+        if (!found) {
+            return "";
+        }
+        double oldX = posX, oldY = posY;
+        posX = planX = alongY ? newCross : newDrive;
+        posY = planY = alongY ? newDrive : newCross;
+        return String.format(Locale.US, "ran into the HIVE leg at X %.0f Y %.0f: odometry X %.1f Y %.1f -> X %.1f Y %.1f",
+                alongY ? legCross : legDrive, alongY ? legDrive : legCross, oldX, oldY, posX, posY);
     }
 
     /** Goes to a spot with room to turn on the spot (this one, or the nearest roomy one next to it), and turns. */
@@ -944,7 +1033,13 @@ public class Auto5 extends LinearOpMode {
                 updateOdometry();
                 show("waiting for the webcam to start");
             }
+            backToRef("back at this spot");
             lookAtHive("is the " + cell + " CELL up?");
+            if (refPose[spot] != null && missedCell(behind)) {
+                // Seen from here before: missing tags may mean it is not quite where it was. Back there, look again.
+                backToRef("its tags are not in view");
+                lookAtHive("back where it looked before: is the " + cell + " CELL up?");
+            }
             if (tagsInLook() == 0 && pictures >= MIN_PICTURES) {
                 scanForHive();  // no tags at all: turn to find the HIVE, then decide and aim from what it sees
             }
@@ -994,6 +1089,9 @@ public class Auto5 extends LinearOpMode {
             // The first time a CELL we shoot at is seen, its height is also what "UP" looks like.
             CellLook now = cellLook(behind == UP_NEAR ? nearCellIndex() : farCellIndex());
             beforeHeight = now.tags > 0 ? now.up : Double.NaN;
+            if (now.tags > 0 && lastLookPose != null) {
+                refPose[spot] = lastLookPose.clone();  // checks from this spot go back here first
+            }
             if (Double.isNaN(upHeight) && now.tags > 0) {
                 upHeight = now.up;
                 note(String.format(Locale.US, "  an UP CELL's tags look %.1f in. high from a shooting spot: that is the reference now", upHeight));
@@ -1030,8 +1128,17 @@ public class Auto5 extends LinearOpMode {
         double reference = Double.isNaN(beforeHeight) ? upHeight : beforeHeight;
         int seen = UP_UNKNOWN;
         if (portal != null) {
+            backToRef("before the tip check");
             lookAtHive("did it tip?");
             seen = behindState(shotAt, reference);
+            if (missedCell(shotAt)) {
+                // Its tags not in view: tipped, or just not looking from the right place. Back to where
+                // it looked before the volley, and look again before believing it.
+                backToRef("its tags are not in view");
+                lookAtHive("back where it looked before the volley: did it tip?");
+                seen = behindState(shotAt, reference);
+                note("tip check, looked again from the reference spot: " + upNote);
+            }
             if (seen == shotAt && CAMERA_DECIDES) {
                 // "NOT tipped" changes the plan (it shoots this CELL again): look once more first.
                 note("tip check, first look: " + upNote);
@@ -1218,6 +1325,14 @@ public class Auto5 extends LinearOpMode {
             }
             boolean last = i == spots.length - 1;
             double arrive = spots[i].length > 2 ? spots[i][2] : 1;
+            if (!last && arrive >= 1) {  // a sharp corner next: arrive slowly, or it overshoots (simulator, run 6)
+                double[] from = i == 0 ? new double[] {planX, planY} : spots[i - 1];
+                double a1 = Math.atan2(spots[i][1] - from[1], spots[i][0] - from[0]);
+                double a2 = Math.atan2(spots[i + 1][1] - spots[i][1], spots[i + 1][0] - spots[i][0]);
+                if (Math.abs(wrapDegrees(Math.toDegrees(a2 - a1))) > SHARP_CORNER) {
+                    arrive = CORNER_ARRIVE;
+                }
+            }
             if (!driveLine(spots[i][0], spots[i][1], last && !endsAtWall, arrive)) {
                 break;
             }
@@ -1242,6 +1357,11 @@ public class Auto5 extends LinearOpMode {
         ElapsedTime close = new ElapsedTime();
         ElapsedTime window = new ElapsedTime();  // for the hit check: wheel counts over the last 0.25 s
         int[] windowTicks = lastTicks.clone();
+        ElapsedTime slowWindow = new ElapsedTime();  // for the "much too slow" hit check
+        ElapsedTime loopTimer = new ElapsedTime();
+        ElapsedTime currentTimer = new ElapsedTime(), pushTimer = new ElapsedTime();  // for the "pushing" hit check
+        double maxAmps = 0;
+        double slowAlong = 0, slowExpected = 0, lastSpeed = 0;
         double furthest = -Double.MAX_VALUE;
         boolean blocked = false;
         String why = "";
@@ -1273,6 +1393,49 @@ public class Auto5 extends LinearOpMode {
             }
             if (watchHits && why.isEmpty() && timer.seconds() > 0.3 && Math.abs(wrapDegrees(heading - planHeading)) > HIT_TWIST) {
                 why = String.format(Locale.US, "twisted %.0f deg", wrapDegrees(heading - planHeading));
+            }
+            // Pushing something with the wheels spinning: odometry still moves, but far slower than the
+            // power asks for (the simulator's stuck-on-a-leg case). Checked over SLOW_TIME windows,
+            // after the first half second (getting up to speed).
+            double dtLoop = loopTimer.seconds();
+            loopTimer.reset();
+            if (watchHits && timer.seconds() < 0.5) {
+                slowWindow.reset();
+                slowAlong = along;
+                slowExpected = 0;
+            } else if (watchHits) {
+                slowExpected += Math.abs(lastSpeed) * TOP_SPEED * dtLoop;
+                if (slowWindow.seconds() >= SLOW_TIME) {
+                    double got = along - slowAlong;
+                    if (why.isEmpty() && slowExpected > 4 && got < SLOW_PROGRESS * slowExpected) {
+                        why = String.format(Locale.US, "going %.0f%% of the speed its power should give: pushing something",
+                                100 * Math.max(0, got) / slowExpected);
+                    }
+                    slowWindow.reset();
+                    slowAlong = along;
+                    slowExpected = 0;
+                }
+            }
+            // Pushing something: the wheels draw far more current than cruising at this power would.
+            if (watchHits && timer.seconds() > 0.3 && currentTimer.seconds() >= CURRENT_EVERY) {
+                currentTimer.reset();
+                double amps = 0, pw = 0;
+                for (int i = 0; i < 4; i++) {
+                    if (wheels[i] instanceof DcMotorEx) {
+                        amps += ((DcMotorEx) wheels[i]).getCurrent(CurrentUnit.AMPS) / 4;
+                    }
+                    pw += Math.abs(power[i]) / 4;
+                }
+                maxAmps = Math.max(maxAmps, amps);
+                if (pw > 0.25 && amps > PUSH_AMPS * pw) {
+                    if (pushTimer.seconds() >= PUSH_TIME && why.isEmpty()) {
+                        why = String.format(Locale.US, "wheels pulling %.1f A at power %.2f: pushing something", amps, pw);
+                    }
+                } else {
+                    pushTimer.reset();
+                }
+            } else if (!watchHits || timer.seconds() <= 0.3) {
+                pushTimer.reset();
             }
             if (!why.isEmpty()) {
                 blocked = true;
@@ -1320,6 +1483,11 @@ public class Auto5 extends LinearOpMode {
                 double cap = NEAR_POWER + (1 - NEAR_POWER) * Math.min(1, clearance() / SLOW_NEAR);
                 speed = Math.copySign(Math.min(Math.abs(speed), Math.max(cap, floor)), speed);
             }
+            if (ux > 0.5) {  // toward the midline: slow down as it gets close to MAX_X, so it can't overshoot (G402)
+                double cap = Math.max(floor, Math.min(1, (MAX_X - posX) / MIDLINE_SLOW));
+                speed = Math.copySign(Math.min(Math.abs(speed), cap), speed);
+            }
+            lastSpeed = speed;
             // Field directions: along the line, plus a push back toward it (to its left when right of it).
             double fix = Range.clip(LINE_GAIN * offLine, -MAX_LINE_FIX, MAX_LINE_FIX);
             double vx = ux * speed - uy * fix;
@@ -1342,9 +1510,9 @@ public class Auto5 extends LinearOpMode {
             hitDirX = ux;
             hitDirY = uy;
         }
-        logRow("cmd", String.format(Locale.US, "line %s after %.2f s: odometry X %.1f Y %.1f, off the line %.1f in.",
+        logRow("cmd", String.format(Locale.US, "line %s after %.2f s: odometry X %.1f Y %.1f, off the line %.1f in.%s",
                 blocked ? "BLOCKED (" + why + ")" : timer.seconds() >= 2 + length / 8 ? "TIMED OUT" : "done",
-                timer.seconds(), posX, posY, offLine));
+                timer.seconds(), posX, posY, offLine, maxAmps > 0 ? String.format(Locale.US, "; highest wheel current %.1f A", maxAmps) : ""));
         return !blocked;
     }
 
@@ -1454,6 +1622,7 @@ public class Auto5 extends LinearOpMode {
                         + " far CELL %d tags %.1f behind %.1f right %.1f up", what, pictures, portal.getCameraState(),
                 n.tags, n.behind, n.right, n.up, f.tags, f.behind, f.right, f.up));
         fixFromCamera();
+        lastLookPose = new double[] {posX, posY, heading};
         logRow("look", "after the look: " + fixNote);
         // Keep the camera's picture when a look found no tag at all (and the very first look, to compare):
         // /sdcard/VisionPortal-auto5-<run>-<seconds>s.png on the Control Hub.
@@ -1463,6 +1632,40 @@ public class Auto5 extends LinearOpMode {
             savedPictures++;
             logRow("look", "saved the camera picture /sdcard/VisionPortal-" + name + ".png");
         }
+    }
+
+    /** The last look gave pictures but none of this CELL's tags. */
+    boolean missedCell(int which) {
+        return pictures >= MIN_PICTURES && cellLook(which == UP_NEAR ? nearCellIndex() : farCellIndex()).tags == 0;
+    }
+
+    /**
+     * Back to where the robot stood for this spot's reference look (refPose), by odometry: turn back to
+     * its heading, then a short eased move. Within REF_OK in. and REF_TURN_OK deg it stays (a little off
+     * is fine). True if it moved.
+     */
+    boolean backToRef(String why) {
+        double[] ref = refPose[spot];
+        if (ref == null) {
+            return false;
+        }
+        double d = Math.hypot(posX - ref[0], posY - ref[1]), dh = Math.abs(wrapDegrees(heading - ref[2]));
+        if (d <= REF_OK && dh <= REF_TURN_OK) {
+            return false;
+        }
+        note(String.format(Locale.US, "  %s: %.1f in. and %.0f deg from where it looked before: going back", why, d, dh));
+        if (dh > REF_TURN_OK) {
+            turnTo(ref[2], 1.5, false);
+        }
+        planHeading = ref[2];
+        if (Math.hypot(posX - ref[0], posY - ref[1]) > REF_OK) {
+            planX = posX;
+            planY = posY;
+            drivePath(new double[][] {{ref[0], ref[1]}}, false);  // eases onto it
+        }
+        logRow("cmd", String.format(Locale.US, "back at the reference look spot: X %.1f Y %.1f heading %.1f (wanted %.1f %.1f %.1f)",
+                posX, posY, heading, ref[0], ref[1], ref[2]));
+        return true;
     }
 
     /** Switches the tag finder on (to look) or off (while driving: it takes a lot of the Control Hub's time). */
@@ -1728,6 +1931,11 @@ public class Auto5 extends LinearOpMode {
         // Run 5: turning by backing one side off the wall moved the robot 40 in. away over the scan.
         // Now it backs off the wall once and turns on the spot.
         leaveWall(LEAVE_WALL);
+        // Simulator: turning on the spot at X 60 swings a corner to within 0.5 in. of the midline (half
+        // diagonal 12 in.), so odometry 1 in. off crossed it (G402). Over to TURN_X first.
+        if (posX > TURN_X) {
+            goTo(TURN_X, posY);
+        }
         for (double a : new double[] {SCAN_STEP, -SCAN_STEP, 2 * SCAN_STEP, -2 * SCAN_STEP}) {
             if (Math.abs(a) > SCAN_MAX || !opModeIsActive()) {
                 continue;

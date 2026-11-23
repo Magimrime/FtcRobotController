@@ -1,0 +1,595 @@
+<title>BIOBUZZ Auto Replay</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a scoreboard strip, then the field on the left with its playback bar under it and the live
+   readouts + event log on the right; every simulated match below as a grid of PASS/FAIL chips. */
+:root {
+  --bg: #eef1f4; --panel: #ffffff; --ink: #16202b; --muted: #5a6877; --line: #d3dae2;
+  --tile: #e2e6ea; --tile-line: #cbd2da; --wall: #2b3540;
+  --red: #c8323b; --blue: #2a64c9; --pollen: #e3ad00; --accent: #e0a100; --on-accent: #1d1600;
+  --path: #15803d; --odo: #7c3aed; --cam: #0e7490;
+  --pass: #157a3c; --pass-bg: #e3f4e9; --fail: #c2261f; --fail-bg: #fbe7e5; --late: #b86e00;
+  --font-display: "Barlow Condensed", "Arial Narrow", system-ui, sans-serif;
+  --font-body: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1318; --panel: #151c23; --ink: #e5eaef; --muted: #93a2b0; --line: #27323d;
+    --tile: #1a2229; --tile-line: #27313b; --wall: #a7b6c4;
+    --red: #f0545d; --blue: #5d95ff; --pollen: #f2c230; --accent: #f2b81e; --on-accent: #1d1600;
+    --path: #34d399; --odo: #b794ff; --cam: #22b8cf;
+    --pass: #3dd68c; --pass-bg: #10291c; --fail: #ff6a5c; --fail-bg: #331412; --late: #f0a840;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1318; --panel: #151c23; --ink: #e5eaef; --muted: #93a2b0; --line: #27323d;
+  --tile: #1a2229; --tile-line: #27313b; --wall: #a7b6c4;
+  --red: #f0545d; --blue: #5d95ff; --pollen: #f2c230; --accent: #f2b81e; --on-accent: #1d1600;
+  --path: #34d399; --odo: #b794ff; --cam: #22b8cf;
+  --pass: #3dd68c; --pass-bg: #10291c; --fail: #ff6a5c; --fail-bg: #331412; --late: #f0a840;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font: 14px/1.45 var(--font-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 0 32px; }
+.app { max-width: 1240px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+h1, h2, h3 { font-family: var(--font-display); font-weight: 700; letter-spacing: .01em; text-wrap: balance; margin: 0; }
+.label { font-family: var(--font-display); font-weight: 600; text-transform: uppercase; letter-spacing: .08em; font-size: 12px; color: var(--muted); }
+.num { font-variant-numeric: tabular-nums; }
+button, select, input { font: inherit; color: inherit; }
+button:focus-visible, select:focus-visible, input:focus-visible, .chip:focus-visible, li:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.top { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 16px; padding-top: 16px; border-bottom: 1px solid var(--line); padding-bottom: 10px; }
+.brand { font-family: var(--font-display); font-weight: 700; font-size: 22px; letter-spacing: .02em; }
+.brand span { color: var(--muted); font-weight: 500; font-size: 16px; margin-left: 8px; }
+.tally { display: flex; gap: 12px; align-items: baseline; font-family: var(--font-display); font-size: 16px; }
+.tally b { font-size: 22px; }
+.tally .p { color: var(--pass); } .tally .f { color: var(--fail); }
+
+.run-head { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; }
+.run-head h1 { font-size: 26px; min-width: 0; }
+.pill { font-family: var(--font-display); font-weight: 700; font-size: 15px; letter-spacing: .06em; padding: 2px 10px; border-radius: 999px; border: 1.5px solid currentColor; }
+.pill.pass { color: var(--pass); background: var(--pass-bg); } .pill.fail { color: var(--fail); background: var(--fail-bg); }
+.score { font-family: var(--font-display); font-size: 18px; }
+.score b { font-size: 24px; }
+.why { flex-basis: 100%; color: var(--fail); }
+.why.ok { color: var(--muted); }
+
+.stage { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 900px) { .stage { grid-template-columns: minmax(0, 1fr); } }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+.field-col { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.field-wrap { padding: 8px; }
+#field { display: block; width: 100%; max-width: 100%; aspect-ratio: 1 / 1.04; }
+.transport { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; padding: 10px 12px; }
+.play { background: var(--accent); color: var(--on-accent); border: 0; border-radius: 8px; width: 44px; height: 38px; font-size: 18px; cursor: pointer; }
+.ghost { background: transparent; border: 1px solid var(--line); border-radius: 8px; height: 34px; padding: 0 10px; cursor: pointer; }
+.ghost:hover, .chip:hover { border-color: var(--muted); }
+.clock { font-family: var(--font-display); font-size: 22px; min-width: 104px; }
+.clock small { color: var(--muted); font-size: 15px; }
+#scrub { flex: 1 1 220px; min-width: 0; accent-color: var(--accent); }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; color: var(--muted); font-size: 12px; padding: 0 4px; }
+.legend i { display: inline-block; width: 18px; height: 0; border-top: 3px solid; vertical-align: middle; margin-right: 6px; }
+
+.side { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.now { padding: 12px 14px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 16px; }
+.now .wide { grid-column: 1 / -1; }
+.now .v { font-family: var(--font-display); font-size: 20px; font-weight: 600; line-height: 1.15; overflow-wrap: anywhere; }
+.now .v.step { font-family: var(--font-body); font-size: 15px; font-weight: 600; }
+.flag { color: var(--fail); font-weight: 600; }
+.chart { padding: 10px 12px 6px; }
+#err { display: block; width: 100%; height: 80px; }
+.hint { color: var(--muted); font-size: 12px; }
+.transport .grp2 { display: flex; gap: 8px; align-items: center; }
+.events { padding: 10px 0 4px; }
+.events .label { padding: 0 14px 6px; display: block; }
+#events { position: relative; list-style: none; margin: 0; padding: 0; max-height: 330px; overflow-y: auto; font-family: var(--font-mono); font-size: 12px; }
+#events li { display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 8px; padding: 3px 14px; cursor: pointer; border-left: 3px solid transparent; }
+#events li .tm { color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+#events li.past { opacity: .55; }
+#events li.cur { opacity: 1; background: var(--bg); border-left-color: var(--accent); }
+#events li.bad .tx { color: var(--fail); font-weight: 500; }
+#events li.good .tx { color: var(--pass); font-weight: 500; }
+#events li.step .tx { font-weight: 600; }
+#events li.screen .tx { color: var(--muted); }
+
+.matches { padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+.mh { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; }
+.mh h2 { font-size: 20px; }
+.filters { display: flex; flex-wrap: wrap; gap: 6px; }
+.filters button { border: 1px solid var(--line); background: transparent; border-radius: 999px; padding: 2px 12px; cursor: pointer; font-size: 13px; }
+.filters button[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.groups { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 4px 20px; }
+.grp { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 5px 0; border-bottom: 1px solid var(--line); }
+.grp .gn { font-size: 13px; min-width: 0; overflow-wrap: anywhere; }
+.grp .gn small { color: var(--muted); }
+.chips { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+.chip { font-family: var(--font-display); font-weight: 600; font-size: 13px; border-radius: 6px; padding: 1px 7px; cursor: pointer; border: 1.5px solid transparent; font-variant-numeric: tabular-nums; }
+.chip.pass { color: var(--pass); background: var(--pass-bg); } .chip.fail { color: var(--fail); background: var(--fail-bg); }
+.chip.sel { border-color: var(--ink); }
+
+.details { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+.details .panel { padding: 12px 14px; min-width: 0; }
+.details h3 { font-size: 17px; margin-bottom: 6px; }
+table.kv { border-collapse: collapse; width: 100%; font-size: 13px; }
+table.kv td { padding: 3px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+table.kv td:last-child { text-align: right; font-variant-numeric: tabular-nums; padding-left: 12px; }
+.vol { font-size: 13px; margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; }
+details summary { cursor: pointer; font-weight: 600; }
+.scr { overflow-x: auto; background: var(--bg); border-radius: 6px; padding: 8px; margin: 8px 0 0; font: 11px/1.3 var(--font-mono); white-space: pre; }
+.err-box { padding: 16px; color: var(--fail); }
+</style>
+<!--SIM_DATA-->
+<div class="app">
+  <header class="top">
+    <div class="brand">BIOBUZZ AUTO replay<span id="suite"></span></div>
+    <div class="tally" id="tally"></div>
+  </header>
+
+  <section class="run-head" aria-live="polite">
+    <h1 id="runTitle">Loading matches</h1>
+    <span class="pill" id="verdict"></span>
+    <span class="score" id="score"></span>
+    <div class="why" id="why"></div>
+  </section>
+
+  <main class="stage">
+    <div class="field-col">
+      <div class="panel field-wrap"><canvas id="field" aria-label="Field seen from the audience, with the robot replaying the match"></canvas></div>
+      <div class="panel transport">
+        <button class="play" id="play" aria-label="Play">&#9654;</button>
+        <div class="clock num"><span id="clock">0.0</span> <small>/ 30 s</small></div>
+        <input type="range" id="scrub" min="0" max="30.5" step="0.05" value="0" aria-label="Match time">
+        <div class="grp2">
+          <button class="ghost" id="prevEv" title="Previous event">&#9664; event</button>
+          <button class="ghost" id="nextEv" title="Next event">event &#9654;</button>
+          <select class="ghost" id="speed" aria-label="Playback speed">
+            <option value="0.5">0.5x</option><option value="1" selected>1x</option><option value="2">2x</option><option value="4">4x</option>
+          </select>
+        </div>
+      </div>
+      <div class="legend">
+        <span><i style="border-color: var(--path)"></i>true path</span>
+        <span><i style="border-color: var(--odo); border-top-style: dashed"></i>where odometry thinks it is</span>
+        <span><i style="border-color: var(--cam)"></i>camera view (darker = tags seen)</span>
+        <span><i style="border-color: var(--pollen)"></i>intake side, POLLEN</span>
+      </div>
+    </div>
+
+    <aside class="side">
+      <div class="panel now">
+        <div class="wide"><div class="label">Doing</div><div class="v step" id="nStep">-</div></div>
+        <div><div class="label">Our HIVE</div><div class="v" id="nHive">-</div></div>
+        <div><div class="label">POLLEN held</div><div class="v num" id="nHeld">-</div></div>
+        <div><div class="label">Flywheel</div><div class="v num" id="nRpm">-</div></div>
+        <div><div class="label">Battery</div><div class="v num" id="nVolt">-</div></div>
+        <div><div class="label">Tags in view</div><div class="v num" id="nTags">-</div></div>
+        <div><div class="label">Odometry off by</div><div class="v num" id="nErr">-</div></div>
+        <div class="wide" id="nFlags"></div>
+      </div>
+      <div class="panel chart">
+        <div class="label">Odometry error over the match (in.)</div>
+        <div class="hint">Spikes while it pushes a wall are wheel slip; the code resets its position on that wall.</div>
+        <canvas id="err" aria-label="Odometry error over time"></canvas>
+      </div>
+      <div class="panel events">
+        <span class="label">What happened (click to jump)</span>
+        <ol id="events"></ol>
+      </div>
+    </aside>
+  </main>
+
+  <section class="panel matches">
+    <div class="mh">
+      <h2>Every match</h2>
+      <div class="filters" id="filters">
+        <button data-f="all" aria-pressed="true">All</button>
+        <button data-f="op4" aria-pressed="false">Auto4 (Limelight)</button>
+        <button data-f="op5" aria-pressed="false">Auto5 (webcam)</button>
+        <button data-f="auto4" aria-pressed="false">Auto4 setups</button>
+        <button data-f="auto5" aria-pressed="false">Auto5 setups</button>
+        <button data-f="stress" aria-pressed="false">One fault at a time</button>
+        <button data-f="misses" aria-pressed="false">Missed balls, pickups, no tip</button>
+        <button data-f="auto3" aria-pressed="false">Auto3</button>
+        <button data-f="fail" aria-pressed="false">Fails only</button>
+      </div>
+    </div>
+    <div class="groups" id="groups"></div>
+  </section>
+
+  <section class="details">
+    <div class="panel"><h3>This robot vs the code's guesses</h3><table class="kv" id="setup"></table></div>
+    <div class="panel"><h3>Volleys</h3><ol class="vol" id="volleys"></ol></div>
+    <div class="panel">
+      <h3>Driver Station screen</h3>
+      <details><summary>At START (end of INIT)</summary><pre class="scr" id="initScr"></pre></details>
+      <details><summary>At the end</summary><pre class="scr" id="endScr"></pre></details>
+    </div>
+  </section>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+  var D, runs, cur = 0, t = 30.5, playing = false, lastFrame = null, C = {}, errSeries = [], tEnd = 30.5, filter = "all", shownEv = -1;
+  var CELLS = [[59, 82], [59, 62], [85, 62], [85, 82]];  // RED SCORING, RED AUDIENCE, BLUE AUDIENCE, BLUE SCORING (field inches)
+
+  function tokens() {
+    var cs = getComputedStyle(document.documentElement), names = ["bg", "panel", "ink", "muted", "line", "tile", "tile-line", "wall", "red", "blue",
+      "pollen", "accent", "path", "odo", "cam", "pass", "fail", "late", "font-display", "font-body"];
+    names.forEach(function (n) { C[n] = cs.getPropertyValue("--" + n).trim(); });
+  }
+
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
+
+  function isMisses(r) { return r.name.indexOf("-misses-") >= 0; }
+  function isStress(r) { return r.name.indexOf("-stress-") >= 0 || r.name.indexOf("-pick-") >= 0 || isMisses(r); }
+
+  function title(r) {
+    if (isStress(r)) return r.name.replace(/^(Auto\d)-(stress|pick|misses)-/, function (m, op, k) {
+      return op + (k === "pick" ? " X pick: " : ", ");
+    }).replace(/-s(\d+)$/, ", seed $1").replace(/-/g, " ");
+    var bits = [r.opmode, r.alliance.toUpperCase(), r.start + " start", r.up + " CELL up"];
+    bits.push(r.opmode === "Auto3" ? r.path + " path" : r.pick + " pick");
+    bits.push(r.noise === "none" ? "no noise" : r.noise + " noise, seed " + r.seed);
+    return bits.join(" ·");
+  }
+
+  function groupLabel(r) {
+    if (isStress(r)) return title(r).replace(/, seed \d+$/, "");
+    var b = [r.opmode, r.alliance, r.start + " start", r.up + " up"];
+    if (r.opmode === "Auto3") b.push(r.path + " path");
+    b.push(r.noise === "none" ? "no noise" : r.noise);
+    return b.join(" ·");
+  }
+
+  // ---------------------------------------------------------------- samples
+  function idx(S, time) {
+    var lo = 0, hi = S.t.length - 1;
+    if (time <= S.t[0]) return 0;
+    if (time >= S.t[hi]) return hi;
+    while (hi - lo > 1) { var m = (lo + hi) >> 1; if (S.t[m] <= time) lo = m; else hi = m; }
+    return lo;
+  }
+  function lerp(a, b, u) { return a + (b - a) * u; }
+  function lerpAng(a, b, u) { var d = ((b - a + 540) % 360) - 180; return a + d * u; }
+  function pose(S, time, odo) {
+    var i = idx(S, time), j = Math.min(i + 1, S.t.length - 1);
+    var u = j === i ? 0 : Math.max(0, Math.min(1, (time - S.t[i]) / (S.t[j] - S.t[i])));
+    var kx = odo ? "ox" : "x", ky = odo ? "oy" : "y", kh = odo ? "oh" : "h";
+    if (S[kx][i] === null) return null;
+    if (S[kx][j] === null) j = i;
+    return { x: lerp(S[kx][i], S[kx][j], u), y: lerp(S[ky][i], S[ky][j], u), h: lerpAng(S[kh][i], S[kh][j], u), i: i };
+  }
+
+  // ---------------------------------------------------------------- field drawing
+  function draw() {
+    var r = runs[cur], S = r.s, cv = $("field"), g = cv.getContext("2d");
+    var W = cv.clientWidth, H = W * 1.04, dpr = window.devicePixelRatio || 1;
+    if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, W, H);
+    var pad = W * 0.045, sc = (W - 2 * pad) / 144;
+    var X = function (x) { return pad + x * sc; }, Y = function (y) { return pad + (144 - y) * sc; };
+    var blue = r.alliance === "blue";
+
+    // tiles and halves
+    g.fillStyle = C.tile; g.fillRect(X(0), Y(144), 144 * sc, 144 * sc);
+    g.globalAlpha = 0.07; g.fillStyle = C.red; g.fillRect(X(0), Y(144), 72 * sc, 144 * sc);
+    g.fillStyle = C.blue; g.fillRect(X(72), Y(144), 72 * sc, 144 * sc); g.globalAlpha = 1;
+    g.strokeStyle = C["tile-line"]; g.lineWidth = 1;
+    for (var k = 1; k < 6; k++) { line(g, X(k * 24), Y(0), X(k * 24), Y(144)); line(g, X(0), Y(k * 24), X(144), Y(k * 24)); }
+    g.setLineDash([6, 5]); g.strokeStyle = C.muted; g.lineWidth = 1.5; line(g, X(72), Y(0), X(72), Y(144)); g.setLineDash([]);
+    // walls: red and blue alliance walls coloured
+    g.lineWidth = 4; g.strokeStyle = C.wall; g.strokeRect(X(0), Y(144), 144 * sc, 144 * sc);
+    g.strokeStyle = C.red; line(g, X(0), Y(0), X(0), Y(144)); g.strokeStyle = C.blue; line(g, X(144), Y(0), X(144), Y(144));
+    g.fillStyle = C.muted; g.font = "600 " + Math.max(10, 11 * W / 600) + "px " + C["font-display"]; g.textAlign = "center";
+    g.fillText("AUDIENCE", X(72), Y(0) + pad * 0.75);
+    g.fillText("FAR WALL", X(72), Y(144) - pad * 0.3);
+
+    // loading zone (guess), HIVE frame, legs
+    var lz = r.lz;
+    g.setLineDash([5, 4]); g.strokeStyle = C.pollen; g.lineWidth = 1.5; g.globalAlpha = 0.9;
+    g.strokeRect(X(lz[0]), Y(lz[3]), (lz[2] - lz[0]) * sc, (lz[3] - lz[1]) * sc); g.globalAlpha = 1;
+    g.strokeStyle = C.muted; g.strokeRect(X(72 - 24.73), Y(72 + 19.475), 49.46 * sc, 38.95 * sc); g.setLineDash([]);
+    g.fillStyle = C.muted; g.font = "500 " + Math.max(9, 10 * W / 600) + "px " + C["font-body"];
+    g.fillText("loading zone?", X((lz[0] + lz[2]) / 2), Y((lz[1] + lz[3]) / 2) + 4);
+    if (r.legHalf > 0) {
+      g.fillStyle = C.wall;
+      [[72 - 24.73, 72 - 19.475], [72 + 24.73, 72 - 19.475], [72 - 24.73, 72 + 19.475], [72 + 24.73, 72 + 19.475]].forEach(function (p) {
+        g.fillRect(X(p[0] - r.legHalf), Y(p[1] + r.legHalf), 2 * r.legHalf * sc, 2 * r.legHalf * sc);
+      });
+    }
+
+    // CELLs, up or down now
+    var i = idx(S, t), redAud = S.hr[i] === 1, blueAud = S.hb[i] === 1;
+    var near = blue ? 3 : 1, far = blue ? 2 : 0;
+    for (var c = 0; c < 4; c++) {
+      var up = c === 0 ? !redAud : c === 1 ? redAud : c === 2 ? blueAud : !blueAud;
+      var col = c <= 1 ? C.red : C.blue, cx = CELLS[c][0], cy = CELLS[c][1], hx = r.cellOpen[0], hy = r.cellOpen[1];
+      g.globalAlpha = up ? 0.85 : 0.18; g.fillStyle = col; g.fillRect(X(cx - hx), Y(cy + hy), 2 * hx * sc, 2 * hy * sc); g.globalAlpha = 1;
+      g.strokeStyle = col; g.lineWidth = 1.5; if (!up) g.setLineDash([3, 3]); g.strokeRect(X(cx - hx), Y(cy + hy), 2 * hx * sc, 2 * hy * sc); g.setLineDash([]);
+      g.fillStyle = up ? "#ffffff" : col; g.font = "700 " + Math.max(10, 12 * W / 600) + "px " + C["font-display"];
+      g.fillText(up ? "UP" : "down", X(cx), Y(cy) + 4);
+      if (c === near || c === far) {
+        g.fillStyle = C.ink; g.font = "600 " + Math.max(9, 10 * W / 600) + "px " + C["font-display"];
+        var below = (c === near) !== blue;  // near CELL label toward our start wall
+        g.fillText(c === near ? "OUR NEAR" : "OUR FAR", X(cx), below ? Y(cy - hy) + 12 : Y(cy + hy) - 4);
+      }
+    }
+
+    // GARDEN POLLEN not yet picked up
+    r.garden.forEach(function (b) {
+      if (b[2] >= 0 && b[2] <= t) return;
+      var missed = b.length > 3 && b[3] >= 0 && b[3] <= t;  // the intake went over it and missed: it rolls a little aside
+      if (missed) {
+        g.globalAlpha = 0.55; circle(g, X(b[0] + 2.5), Y(b[1] + 2.5), 1.4 * sc, C.pollen, C.fail); g.globalAlpha = 1;
+        g.strokeStyle = C.fail; g.lineWidth = 1.5; var q = 1.1 * sc, cx = X(b[0] + 2.5), cy = Y(b[1] + 2.5);
+        line(g, cx - q, cy - q, cx + q, cy + q); line(g, cx - q, cy + q, cx + q, cy - q);
+        return;
+      }
+      circle(g, X(b[0]), Y(b[1]), 1.4 * sc, C.pollen, C.wall);
+    });
+
+    // trails
+    var pNow = pose(S, t, false), oNow = pose(S, t, true);
+    trail(g, S, "ox", "oy", pNow.i, oNow, X, Y, C.odo, 1.6, [5, 4]);
+    trail(g, S, "x", "y", pNow.i, pNow, X, Y, C.path, 2.4, []);
+
+    // where each ball came down so far
+    r.balls.forEach(function (b) {
+      if (b[1] > t) return;
+      var col = b[6] === 1 ? C.pass : b[6] === 2 ? C.fail : b[6] === 3 ? C.late : C.muted;
+      g.fillStyle = col; g.beginPath(); g.arc(X(b[4]), Y(b[5]), Math.max(2, 0.9 * sc), 0, 7); g.fill();
+    });
+
+    // camera view
+    var fl = S.flags[i], tags = S.tags[i];
+    var hr = pNow.h * Math.PI / 180, fx = Math.cos(hr), fy = Math.sin(hr);
+    var camX = pNow.x - r.cam[0] * fx, camY = pNow.y - r.cam[0] * fy, a0 = pNow.h + 180, half = r.cam[1] / 2;
+    g.beginPath(); g.moveTo(X(camX), Y(camY));
+    for (var s2 = 0; s2 <= 16; s2++) {
+      var a = (a0 - half + s2 * half / 8) * Math.PI / 180;
+      g.lineTo(X(camX + 84 * Math.cos(a)), Y(camY + 84 * Math.sin(a)));
+    }
+    g.closePath(); g.globalAlpha = tags > 0 ? 0.22 : 0.07; g.fillStyle = C.cam; g.fill(); g.globalAlpha = 1;
+
+    // odometry ghost, then the real robot
+    if (oNow) robot(g, oNow, r, X, Y, sc, C.odo, true);
+    robot(g, pNow, r, X, Y, sc, (fl & 3) ? C.fail : C.ink, false);
+    if (fl & 3) {
+      g.strokeStyle = C.fail; g.lineWidth = 3; g.beginPath(); g.arc(X(pNow.x), Y(pNow.y), 15 * sc, 0, 7); g.stroke();
+    }
+
+    // balls in the air
+    r.balls.forEach(function (b) {
+      if (t < b[0] || t >= b[1]) return;
+      var u = (t - b[0]) / (b[1] - b[0]);
+      circle(g, X(lerp(b[2], b[4], u)), Y(lerp(b[3], b[5], u)), 1.4 * sc * (1 + 0.9 * Math.sin(Math.PI * u)), C.pollen, C.wall);
+    });
+  }
+
+  function line(g, x0, y0, x1, y1) { g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke(); }
+  function circle(g, x, y, rad, fill, stroke) { g.beginPath(); g.arc(x, y, rad, 0, 7); g.fillStyle = fill; g.fill(); g.strokeStyle = stroke; g.lineWidth = 0.8; g.stroke(); }
+
+  function trail(g, S, kx, ky, upto, now, X, Y, color, width, dash) {
+    g.strokeStyle = color; g.lineWidth = width; g.setLineDash(dash); g.lineJoin = "round"; g.beginPath();
+    var started = false;
+    for (var k = 0; k <= upto; k++) {
+      if (S[kx][k] === null) { started = false; continue; }
+      if (!started) { g.moveTo(X(S[kx][k]), Y(S[ky][k])); started = true; } else g.lineTo(X(S[kx][k]), Y(S[ky][k]));
+    }
+    if (now && started) g.lineTo(X(now.x), Y(now.y));
+    g.stroke(); g.setLineDash([]);
+  }
+
+  function robot(g, p, r, X, Y, sc, color, ghost) {
+    var h = p.h * Math.PI / 180, c = Math.cos(h), s = Math.sin(h), hl = r.robot[0], hw = r.robot[1];
+    var pts = [[hl, hw], [hl, -hw], [-hl, -hw], [-hl, hw]].map(function (q) { return [p.x + q[0] * c + q[1] * s, p.y + q[0] * s - q[1] * c]; });
+    g.beginPath(); pts.forEach(function (q, k) { if (k) g.lineTo(X(q[0]), Y(q[1])); else g.moveTo(X(q[0]), Y(q[1])); }); g.closePath();
+    if (ghost) { g.setLineDash([4, 3]); g.strokeStyle = color; g.lineWidth = 1.5; g.stroke(); g.setLineDash([]); return; }
+    g.globalAlpha = 0.16; g.fillStyle = color; g.fill(); g.globalAlpha = 1; g.strokeStyle = color; g.lineWidth = 2; g.stroke();
+    g.strokeStyle = C.pollen; g.lineWidth = 4; line(g, X(pts[0][0]), Y(pts[0][1]), X(pts[1][0]), Y(pts[1][1]));  // intake (front)
+    var bx = p.x - hl * c, by = p.y - hl * s;  // launcher (back)
+    g.fillStyle = color; g.beginPath(); g.arc(X(bx), Y(by), Math.max(3, 1.6 * sc), 0, 7); g.fill();
+  }
+
+  // ---------------------------------------------------------------- readouts
+  function readouts() {
+    var r = runs[cur], S = r.s, i = idx(S, t), p = pose(S, t, false), o = pose(S, t, true);
+    var blue = r.alliance === "blue";
+    var ourAud = blue ? S.hb[i] === 1 : S.hr[i] === 1;   // our HIVE's audience CELL is up
+    var nearUp = blue ? !ourAud : ourAud;
+    $("clock").textContent = Math.max(0, t).toFixed(1);
+    $("scrub").value = t;
+    $("nStep").textContent = r.steps[S.step[i]] || "-";
+    $("nHive").textContent = (nearUp ? "near" : "far") + " CELL up";
+    $("nHeld").textContent = S.held[i];
+    $("nRpm").textContent = S.rpm[i] + " RPM";
+    $("nVolt").textContent = S.v[i].toFixed(1) + " V";
+    $("nTags").textContent = S.tags[i];
+    $("nErr").textContent = o ? Math.hypot(o.x - p.x, o.y - p.y).toFixed(1) + " in." : "-";
+    var fl = S.flags[i], f = [];
+    if (fl & 1) f.push("over the midline (G402)");
+    if (fl & 2) f.push("touching a HIVE leg");
+    if (fl & 4) f.push('<span style="color:var(--late)">wheels slipping</span>');
+    $("nFlags").innerHTML = f.map(function (x) { return x.indexOf("<span") === 0 ? x : '<span class="flag">' + x + "</span>"; }).join(" ·");
+    var lis = $("events").children, curEv = -1;
+    for (var k = 0; k < r.events.length; k++) if (r.events[k][0] <= t + 1e-6) curEv = k;
+    for (k = 0; k < lis.length; k++) lis[k].className = lis[k].dataset.kind + (k < curEv ? " past" : k === curEv ? " cur" : "");
+    if (curEv >= 0 && curEv !== shownEv) {
+      shownEv = curEv;
+      var el = lis[curEv], box = $("events");
+      if (el.offsetTop < box.scrollTop || el.offsetTop > box.scrollTop + box.clientHeight - 24) box.scrollTop = el.offsetTop - box.clientHeight / 2;
+    }
+    drawErr();
+  }
+
+  function drawErr() {
+    var cv = $("err"), g = cv.getContext("2d"), W = cv.clientWidth, H = cv.clientHeight, dpr = window.devicePixelRatio || 1;
+    if (cv.width !== Math.round(W * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+    g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+    var S = runs[cur].s, max = 6;
+    errSeries.forEach(function (e) { if (e !== null && e > max) max = e; });
+    max = Math.ceil(max / 2) * 2;
+    var L = 26, B = H - 14, X = function (tt) { return L + (W - L - 4) * tt / tEnd; }, Yv = function (e) { return B - (B - 4) * Math.min(e, max) / max; };
+    g.strokeStyle = C.line; g.lineWidth = 1; line(g, L, B, W - 4, B); line(g, L, Yv(max), W - 4, Yv(max));
+    g.fillStyle = C.muted; g.font = "11px " + C["font-body"]; g.textAlign = "right";
+    g.fillText("0", L - 4, B + 4); g.fillText(String(max), L - 4, Yv(max) + 8);
+    g.textAlign = "center"; [0, 10, 20, 30].forEach(function (s) { g.fillText(s + "s", X(s), H - 1); });
+    g.beginPath(); var on = false;
+    for (var k = 0; k < S.t.length; k++) {
+      var e = errSeries[k]; if (e === null) { on = false; continue; }
+      if (!on) { g.moveTo(X(S.t[k]), Yv(e)); on = true; } else g.lineTo(X(S.t[k]), Yv(e));
+    }
+    g.strokeStyle = C.odo; g.lineWidth = 1.8; g.stroke();
+    g.strokeStyle = C.accent; g.lineWidth = 2; line(g, X(t), 4, X(t), B);
+  }
+
+  // ---------------------------------------------------------------- choosing a run
+  function select(k, fromHash) {
+    cur = k; var r = runs[k], S = r.s;
+    tEnd = S.t[S.t.length - 1];
+    $("scrub").max = tEnd;
+    errSeries = S.t.map(function (_, j) { return S.ox[j] === null ? null : Math.hypot(S.ox[j] - S.x[j], S.oy[j] - S.y[j]); });
+    $("runTitle").textContent = title(r);
+    var v = $("verdict"); v.textContent = r.pass ? "PASS" : "FAIL"; v.className = "pill " + (r.pass ? "pass" : "fail");
+    $("score").innerHTML = "<b class='num'>" + r.points + "</b> pts ·" + r.tips + " TIP" + (r.tips === 1 ? "" : "S") +
+      (r.leave ? " + LEAVE" : "") + (r.park ? " + PARK" : "") + (r.doneAt !== null && r.doneAt >= 0 ? " ·done at " + r.doneAt.toFixed(1) + " s" : " ·still busy at 30 s");
+    var why = $("why");
+    why.className = "why" + (r.pass ? " ok" : "");
+    why.textContent = r.pass ? (r.notes.length ? "Notes: " + r.notes.join("; ") : "Clean run.") : "Failed: " + r.fail.join("; ");
+    $("events").innerHTML = r.events.map(function (e, j) {
+      var tx = e[1], kind = /^!!|DOWN|CRASH|KILLED/.test(tx) ? "bad" : /TIPPED/.test(tx) ? "good" : /^STEP|^DOING/.test(tx) ? "step" : /^screen:/.test(tx) ? "screen" : "";
+      return '<li tabindex="0" data-i="' + j + '" data-kind="' + kind + '"><span class="tm">' + e[0].toFixed(1) + '</span><span class="tx">' + esc(tx.replace(/^screen: /, "screen: ")) + "</span></li>";
+    }).join("");
+    $("setup").innerHTML = r.setup.map(function (p) { return "<tr><td>" + esc(p[0]) + "</td><td>" + esc(p[1]) + "</td></tr>"; }).join("") +
+      "<tr><td>closest to the midline</td><td>" + r.midClear.toFixed(1) + " in.</td></tr><tr><td>closest to a HIVE leg</td><td>" + r.legClear.toFixed(1) + " in.</td></tr>" +
+      "<tr><td>worst odometry error while driving</td><td>" + r.odoErrMax.toFixed(1) + " in.</td></tr>";
+    $("volleys").innerHTML = r.volleys.length ? r.volleys.map(function (x) { return "<li>" + esc(x) + "</li>"; }).join("") : "<li>none</li>";
+    $("initScr").textContent = r.initScreen.join("\n");
+    $("endScr").textContent = r.endScreen.join("\n");
+    document.querySelectorAll(".chip").forEach(function (c) { c.classList.toggle("sel", +c.dataset.i === k); });
+    if (!fromHash) { try { history.replaceState(null, "", "#" + r.name); } catch (e) { /* hash routing is optional */ } }
+    stop();
+    shownEv = -1;
+    t = tEnd;   // open on the finished match: the whole path is visible
+    draw(); readouts();
+  }
+
+  function buildMatches() {
+    var pass = runs.filter(function (r) { return r.pass; }).length;
+    $("tally").innerHTML = "<span><b class='num'>" + runs.length + "</b> matches</span><span class='p'><b class='num'>" + pass +
+      "</b> pass</span><span class='f'><b class='num'>" + (runs.length - pass) + "</b> fail</span>";
+    $("suite").textContent = D.title || "";
+    renderGroups();
+  }
+
+  function renderGroups() {
+    var order = [], groups = {};
+    runs.forEach(function (r, k) {
+      var keep = filter === "all" || (filter === "fail" && !r.pass) || (filter === "auto3" && r.opmode === "Auto3") ||
+        (filter === "stress" && isStress(r) && !isMisses(r)) || (filter === "misses" && isMisses(r)) ||
+        (filter === "auto4" && r.opmode === "Auto4" && !isStress(r)) || (filter === "auto5" && r.opmode === "Auto5" && !isStress(r)) ||
+        (filter === "op4" && r.opmode === "Auto4") || (filter === "op5" && r.opmode === "Auto5");
+      if (!keep) return;
+      if (!groups[r.group]) { groups[r.group] = []; order.push(r.group); }
+      groups[r.group].push(k);
+    });
+    $("groups").innerHTML = order.map(function (gname) {
+      var ks = groups[gname], p = ks.filter(function (k) { return runs[k].pass; }).length;
+      return '<div class="grp"><div class="gn">' + esc(groupLabel(runs[ks[0]])) + " <small>" + p + "/" + ks.length + " pass</small></div><div class='chips'>" +
+        ks.map(function (k) {
+          var r = runs[k];
+          return '<span class="chip ' + (r.pass ? "pass" : "fail") + (k === cur ? " sel" : "") + '" tabindex="0" role="button" data-i="' + k +
+            '" title="' + esc(title(r) + ": " + (r.pass ? "PASS" : r.fail.join("; "))) + '">' + (r.noise === "none" && !/-s\d+$/.test(r.name) ? "" : "s" + r.seed + " ") + r.points + "</span>";
+        }).join("") + "</div></div>";
+    }).join("") || "<div class='gn'>No matches here.</div>";
+  }
+
+  // ---------------------------------------------------------------- playback
+  function frame(now) {
+    if (!playing) return;
+    if (lastFrame !== null) t += (now - lastFrame) / 1000 * parseFloat($("speed").value);
+    lastFrame = now;
+    if (t >= tEnd) { t = tEnd; stop(); }
+    draw(); readouts();
+    if (playing) requestAnimationFrame(frame);
+  }
+  function play() {
+    if (t >= tEnd - 0.01) t = 0;
+    playing = true; lastFrame = null; $("play").innerHTML = "&#10074;&#10074;"; $("play").setAttribute("aria-label", "Pause");
+    requestAnimationFrame(frame);
+  }
+  function stop() { playing = false; $("play").innerHTML = "&#9654;"; $("play").setAttribute("aria-label", "Play"); }
+  function seek(time) { t = Math.max(0, Math.min(tEnd, time)); draw(); readouts(); }
+
+  function wire() {
+    $("play").addEventListener("click", function () { if (playing) stop(); else play(); });
+    $("scrub").addEventListener("input", function () { stop(); seek(parseFloat(this.value)); });
+    $("prevEv").addEventListener("click", function () {
+      var ev = runs[cur].events.filter(function (e) { return e[0] >= 0 && e[0] < t - 0.05; });
+      seek(ev.length ? ev[ev.length - 1][0] : 0);
+    });
+    $("nextEv").addEventListener("click", function () {
+      var ev = runs[cur].events.filter(function (e) { return e[0] > t + 0.05; });
+      seek(ev.length ? ev[0][0] : tEnd);
+    });
+    $("events").addEventListener("click", function (e) {
+      var li = e.target.closest("li"); if (li) { stop(); seek(Math.max(0, runs[cur].events[+li.dataset.i][0])); }
+    });
+    $("events").addEventListener("keydown", function (e) { if (e.key === "Enter" && e.target.dataset.i) { stop(); seek(Math.max(0, runs[cur].events[+e.target.dataset.i][0])); } });
+    $("groups").addEventListener("click", function (e) { var c = e.target.closest(".chip"); if (c) { select(+c.dataset.i); $("runTitle").scrollIntoView({ block: "nearest" }); } });
+    $("groups").addEventListener("keydown", function (e) { var c = e.target.closest(".chip"); if (c && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); select(+c.dataset.i); } });
+    $("filters").addEventListener("click", function (e) {
+      var b = e.target.closest("button"); if (!b) return;
+      filter = b.dataset.f;
+      this.querySelectorAll("button").forEach(function (x) { x.setAttribute("aria-pressed", x === b ? "true" : "false"); });
+      renderGroups();
+    });
+    document.addEventListener("keydown", function (e) {
+      if (/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName) && document.activeElement.id !== "scrub") return;
+      if (e.key === " " && !e.target.closest(".chip")) { e.preventDefault(); if (playing) stop(); else play(); }
+      if (e.key === "ArrowLeft" && document.activeElement.id !== "scrub") { stop(); seek(t - 1); }
+      if (e.key === "ArrowRight" && document.activeElement.id !== "scrub") { stop(); seek(t + 1); }
+    });
+    window.addEventListener("hashchange", function () {
+      var k = runs.findIndex(function (r) { return r.name === decodeURIComponent(location.hash.slice(1)); });
+      if (k >= 0 && k !== cur) select(k, true);
+    });
+    var redraw = function () { tokens(); draw(); readouts(); };
+    if (window.matchMedia) {
+      var mq = window.matchMedia("(prefers-color-scheme: dark)");
+      if (mq.addEventListener) mq.addEventListener("change", redraw);
+    }
+    new MutationObserver(redraw).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    if (window.ResizeObserver) new ResizeObserver(function () { draw(); drawErr(); }).observe($("field").parentNode);
+    else window.addEventListener("resize", function () { draw(); drawErr(); });
+  }
+
+  function boot() {
+    tokens();
+    var start = function () {
+      runs = D.runs;
+      if (!runs || !runs.length) { $("runTitle").textContent = "No matches in this file."; return; }
+      buildMatches(); wire();
+      var k = runs.findIndex(function (r) { return r.name === decodeURIComponent(location.hash.slice(1)); });
+      select(k >= 0 ? k : 0, k >= 0);
+      if (document.fonts && document.fonts.ready) document.fonts.ready.then(function () { draw(); readouts(); });
+    };
+    if (window.SIM_DATA) { D = window.SIM_DATA; start(); return; }
+    fetch("viewer-data.json").then(function (res) { if (!res.ok) throw new Error(res.status); return res.json(); })
+      .then(function (d) { D = d; start(); })
+      .catch(function () {
+        $("runTitle").textContent = "No match data found.";
+        $("why").textContent = "Run .\\sim\\run-sim.ps1 to make this page with its matches inside it.";
+      });
+  }
+  boot();
+})();
+</script>
